@@ -32,6 +32,7 @@
 #include <interfaces/IDeviceSettingsHDMIIn.h>
 #include "DeviceSettingsTypes.h"
 #include "hal/dHdmiInImpl.h"
+#include "hal/dHdmiInAIDLImpl.h"
 
 class HdmiIn {
     using IPlatform = hal::dHdmiIn::IPlatform;
@@ -89,8 +90,66 @@ private:
     INotification& _parent;
 
 public:
+    /**
+     * @brief Factory method with automatic HAL implementation selection
+     * 
+     * This method intelligently selects between AIDL HAL and RDKV HAL implementations:
+     * - If AIDL HAL services are available on the platform, uses dHdmiInAIDLImpl
+     * - Otherwise, falls back to dHdmiInImpl (legacy RDKV HAL)
+     * 
+     * This provides transparent support for both HAL implementations without
+     * requiring caller code changes.
+     * 
+     * @param parent Reference to INotification handler for events
+     * @return HdmiIn instance with appropriate HAL backend
+     */
+    static HdmiIn Create(INotification& parent)
+    {
+        ENTRY_LOG;
+        
+        LOGINFO("HdmiIn::Create - Detecting available HAL implementation");
+        
+        std::shared_ptr<IPlatform> impl;
+        
+        // Try to use AIDL implementation if available
+        if (dHdmiInAIDLImpl::IsAIDLAvailable()) {
+            LOGINFO("HdmiIn::Create - AIDL HAL is available, using dHdmiInAIDLImpl");
+            impl = std::shared_ptr<dHdmiInAIDLImpl>(new dHdmiInAIDLImpl());
+        } else {
+            // Fall back to RDKV implementation
+            LOGINFO("HdmiIn::Create - AIDL HAL not available, using legacy dHdmiInImpl (RDKV)");
+            impl = std::shared_ptr<DefaultImpl>(new DefaultImpl());
+        }
+        
+        ASSERT(impl != nullptr);
+        EXIT_LOG;
+        return HdmiIn(parent, std::move(impl));
+    }
+
+    /**
+     * @brief Template-based factory method for explicit implementation selection
+     * 
+     * This method allows explicit selection of HAL implementation type.
+     * Use this when you need to force a specific implementation regardless
+     * of platform capabilities.
+     * 
+     * @tparam IMPL Implementation class (must derive from IPlatform)
+     * @tparam Args Constructor argument types
+     * @param parent Reference to INotification handler for events
+     * @param args Constructor arguments for IMPL
+     * @return HdmiIn instance with specified HAL backend
+     * 
+     * Example:
+     * @code
+     *   // Use AIDL implementation explicitly
+     *   auto hdmiIn = HdmiIn::Create<dHdmiInAIDLImpl>(notificationHandler);
+     *   
+     *   // Use legacy RDKV implementation explicitly
+     *   auto hdmiIn = HdmiIn::Create<dHdmiInImpl>(notificationHandler);
+     * @endcode
+     */
     template <typename IMPL = DefaultImpl, typename... Args>
-    static HdmiIn Create(INotification& parent, Args&&... args)
+    static HdmiIn CreateExplicit(INotification& parent, Args&&... args)
     {
         ENTRY_LOG;
         static_assert(std::is_base_of<IPlatform, IMPL>::value, "Impl must derive from hal::dHdmiIn::IPlatform");
