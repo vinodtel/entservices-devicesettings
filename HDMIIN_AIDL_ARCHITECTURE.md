@@ -14,14 +14,13 @@
 
 ## Overview
 
-The HdmiIn AIDL HAL architecture provides a factory pattern-based solution for supporting both legacy RDKV HAL and modern AIDL HAL implementations for HDMI Input device control. The design ensures transparent selection and seamless operation regardless of the underlying HAL backend.
+The new architecture provides a factory pattern-based solution for supporting both legacy RDKV HAL and modern AIDL HAL implementations for HDMI Input component. The design ensures transparent selection and seamless operation regardless of the underlying HAL backend.
 
 ### Key Design Principles
 
 - **Factory Pattern**: Automatic HAL implementation detection and selection
 - **Interface Abstraction**: Common `IPlatform` interface for all implementations
 - **Backward Compatibility**: Existing code works unchanged
-- **Extensibility**: Easy to add new HAL implementations
 - **Separation of Concerns**: Each implementation isolated in its own module
 
 ---
@@ -198,11 +197,11 @@ classDiagram
 
 ## Component Descriptions
 
-### 1. HdmiIn Class (Factory & Facade)
+### 1. HdmiIn Class (Factory)
 
 **Location**: `plugin/HdmiIn.h`
 
-**Purpose**: Serves as the factory and facade for HdmiIn operations. Automatically detects and instantiates the appropriate HAL implementation.
+**Purpose**: Serves as the factory for HdmiIn operations. Automatically detects and instantiates the appropriate HAL implementation.
 
 **Key Responsibilities**:
 - Automatic HAL implementation detection
@@ -306,31 +305,6 @@ sequenceDiagram
     end
     
     Note over Client: Client operates transparently<br/>Same code works with both backends
-```
-
-### Port Selection Flow (RDKV Backend)
-
-```mermaid
-sequenceDiagram
-    participant App as Application
-    participant HdmiIn as HdmiIn
-    participant RDKV as dHdmiInImpl
-    participant HAL as RDKV HAL
-    participant Persist as HostPersistence
-
-    App->>HdmiIn: SelectHDMIInPort(port, audioMix, topmost, videoType)
-    HdmiIn->>RDKV: SelectHDMIInPort(...)
-    
-    RDKV->>HAL: dsHdmiInSelectPort(port, audioMix, videoType, topmost)
-    HAL-->>RDKV: dsERR_NONE
-    
-    RDKV->>Persist: persistHostProperty(HDMI port setting)
-    Persist-->>RDKV: success
-    
-    RDKV-->>HdmiIn: ERROR_NONE
-    HdmiIn-->>App: return SUCCESS
-    
-    Note over RDKV: Single direct HAL call
 ```
 
 ### Port Selection Flow (AIDL Backend - Planned)
@@ -471,44 +445,6 @@ sequenceDiagram
 
 ## Data Flow
 
-### Port Selection Data Flow
-
-```mermaid
-graph TB
-    subgraph Input["Input Parameters"]
-        PORT["HDMIInPort"]
-        AUDIO["requestAudioMix: bool"]
-        TOPMOST["topMostPlane: bool"]
-        PLANE["videoPlaneType"]
-    end
-
-    subgraph Processing["Processing Steps"]
-        VALIDATE["Validate Port"]
-        STOP_PREV["Stop Previous"]
-        CONFIG["Configure Plane"]
-        START["Start New Port"]
-        PERSIST["Persist State"]
-    end
-
-    subgraph Output["Output & Effects"]
-        STATUS["Status Updated"]
-        CALLBACKS["Callbacks Fired"]
-    end
-
-    PORT --> VALIDATE
-    AUDIO --> CONFIG
-    TOPMOST --> CONFIG
-    PLANE --> CONFIG
-    
-    VALIDATE --> STOP_PREV
-    STOP_PREV --> CONFIG
-    CONFIG --> START
-    START --> PERSIST
-    
-    PERSIST --> STATUS
-    PERSIST --> CALLBACKS
-```
-
 ### Video Mode Resolution Data Flow
 
 ```mermaid
@@ -622,41 +558,6 @@ graph TB
     LAMBDA --> IFACE
 ```
 
-### 3. Persistence Integration
-
-```mermaid
-graph TB
-    subgraph Impl["Implementation Layer"]
-        LOAD["Load Persisted<br/>Values"]
-        SAVE["Save Changed<br/>Values"]
-    end
-
-    subgraph Persist["HostPersistence API"]
-        GET["getProperty()"]
-        SET["persistHostProperty()"]
-    end
-
-    subgraph Storage["Storage Backend"]
-        DISK["Disk Storage"]
-    end
-
-    LOAD --> GET
-    SAVE --> SET
-    
-    GET -.-> DISK
-    DISK -.-> SET
-    
-    subgraph Values["Persisted Values"]
-        EDID_VER["HDMI{0-3}.edidversion"]
-        ALLM["HDMI{0-3}.edidallmEnable"]
-        VRR["HDMI{0-3}.vrrEnable"]
-    end
-    
-    DISK -.-> EDID_VER
-    DISK -.-> ALLM
-    DISK -.-> VRR
-```
-
 ---
 
 ## Implementation Architecture Comparison
@@ -749,14 +650,6 @@ graph TB
 
 ---
 
-## Conclusion
-
-The HdmiIn AIDL HAL architecture provides a robust, extensible framework for HDMI Input device management with:
-
-1. **Dual Implementation Support**: Seamlessly switches between RDKV and AIDL backends
-2. **Factory Pattern**: Automatic detection with explicit override capability
-3. **Clean Abstraction**: IPlatform interface isolates implementations
-4. **Backward Compatibility**: Existing code requires no modifications
 5. **Event-Driven Design**: Async callback architecture for responsive operation
 6. **Persistent State**: Per-port configuration persistence
 7. **Comprehensive API**: 21 methods covering all HDMI Input functionality
