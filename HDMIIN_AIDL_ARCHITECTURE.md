@@ -648,10 +648,3 @@ graph TB
     AIDL --> AIDL_HAL
 ```
 
----
-
-5. **Event-Driven Design**: Async callback architecture for responsive operation
-6. **Persistent State**: Per-port configuration persistence
-7. **Comprehensive API**: 21 methods covering all HDMI Input functionality
-
-This architecture ensures smooth migration from legacy RDKV HAL to modern AIDL HAL services while maintaining full backward compatibility and code stability.
