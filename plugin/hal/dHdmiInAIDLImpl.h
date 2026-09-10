@@ -1050,6 +1050,12 @@ public:
         bool ok = false;
         if (!hi->getEDID(&edidVec, &ok).isOk() || !ok || edidVec.size() < 128)
             return WPEFramework::Core::ERROR_GENERAL;
+        //VINOD: Remove it
+        for (size_t i = 0; i < edidVec.size(); ++i) {
+            printf("%02x ", edidVec[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+        printf("\n");
         edidVersion = static_cast<HDMIInEdidVersion>(aidlGetEdidVersion(edidVec));
         LOGINFO("GetHDMIEdidVersion: port=%d, version=%d (AIDL)", (int)hdmiPort, (int)edidVersion);
         return WPEFramework::Core::ERROR_NONE;
