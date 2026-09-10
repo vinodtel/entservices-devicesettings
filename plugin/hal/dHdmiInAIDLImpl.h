@@ -576,7 +576,7 @@ private:
         static const uint8_t kHdmiForumOui[] = {0xD8, 0x5D, 0xC4};
         if (edidVec.size() < 128 || memcmp(edidVec.data(), kHdr, sizeof(kHdr)) != 0)
             return HDMI_EDID_VER_MAX;
-        uint8_t extCnt = edidVec[126];
+        uint8_t extCnt = edidVec.size() / 128 - 1; // edidVec[126] contains the extension block count in standard EDID
         if ((edidVec.size() / 128) == 0 || extCnt > (edidVec.size() / 128 - 1))
             return HDMI_EDID_VER_MAX;
         for (uint8_t e = 0; e < extCnt; ++e) {
