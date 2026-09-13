@@ -916,13 +916,13 @@ public:
             }
         }
         std::vector<std::string> features;
-        if (supAllm)     features.emplace_back("allm");
-        if (supVrr)      features.emplace_back("vrr_hdmi");
+        if (supAllm)     features.emplace_back("ALLM");
+        if (supVrr)      features.emplace_back("VRR_HDMI");
         if (supFreeSync) {
             switch (freeSyncTier) {
-                case FreeSync::FREESYNC_PREMIUM:     features.emplace_back("vrr_amd_freesync_premium"); break;
-                case FreeSync::FREESYNC_PREMIUM_PRO: features.emplace_back("vrr_amd_freesync_premium_pro"); break;
-                default:                             features.emplace_back("vrr_amd_freesync"); break;
+                case FreeSync::FREESYNC_PREMIUM:     features.emplace_back("VRR_AMD_FREESYNC_PREMIUM"); break;
+                case FreeSync::FREESYNC_PREMIUM_PRO: features.emplace_back("VRR_AMD_FREESYNC_PREMIUM_PRO"); break;
+                default:                             features.emplace_back("VRR_AMD_FREESYNC"); break;
             }
         }
         LOGINFO("GetSupportedGameFeaturesList count=%zu (AIDL)", features.size());
