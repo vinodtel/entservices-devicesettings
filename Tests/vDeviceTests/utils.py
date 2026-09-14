@@ -247,7 +247,7 @@ def parse_result(curl_response):
 
 
 def is_ok(curl_response):
-    """Return True if a JSON-RPC response is valid and carries a 'result' (no 'error')."""
+    """Return True for a valid JSON-RPC result without an explicit failed status."""
     if not curl_response or curl_response.startswith("< No response"):
         return False
     try:
@@ -256,7 +256,10 @@ def is_ok(curl_response):
         return False
     if not isinstance(body, dict):
         return False
-    return "result" in body and "error" not in body
+    if "result" not in body or "error" in body:
+        return False
+    result = body["result"]
+    return not isinstance(result, dict) or result.get("success", True) is True
 
 
 def responded(curl_response):
