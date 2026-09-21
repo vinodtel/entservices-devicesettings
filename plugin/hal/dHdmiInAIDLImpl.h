@@ -613,7 +613,7 @@ private:
                != caps.supportedVersions.end();
     }
 
-    void aidlInit()
+    void aidlHdmiInInit()
     {
         sp<IHDMIInputManager> mgr = getAidlHdmiMgr();
         if (!mgr) { LOGERR("IHDMIInputManager unavailable"); return; }
@@ -657,9 +657,19 @@ private:
 
     void aidlTerm()
     {
-        std::lock_guard<std::mutex> lk(m_aidlMutex);
-        for (auto& kv : m_aidlPorts) {
-            AidlPortCtx& ctx = kv.second;
+        std::vector<AidlPortCtx> ports;
+        {
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            ports.reserve(m_aidlPorts.size());
+            for (auto& kv : m_aidlPorts)
+                ports.emplace_back(std::move(kv.second));
+            m_aidlPorts.clear();
+            m_aidlHdmiMgr   = nullptr;
+            m_aidlActivePort = -1;
+            m_aidlPortCount = 0;
+        }
+
+        for (auto& ctx : ports) {
             if (ctx.isStarted && ctx.controller) { ctx.controller->stop(); ctx.isStarted = false; }
             if (ctx.isOpen && ctx.hdmiInput && ctx.controller) {
                 bool ok = false;
@@ -671,9 +681,6 @@ private:
                 ctx.hdmiInput->unregisterEventListener(ctx.evtListener, &ok);
             }
         }
-        m_aidlPorts.clear();
-        m_aidlHdmiMgr   = nullptr;
-        m_aidlPortCount = 0;
     }
 
     void getDynamicAutoLatencyConfig()
@@ -762,7 +769,7 @@ public:
         LOGINFO("profileType %d", profileType);
 
         if (TV == profileType) {
-            aidlInit();
+            aidlHdmiInInit();
             LOGINFO("dHdmiInAIDLImpl: AIDL init complete, %d ports found", m_aidlPortCount);
         }
     }
@@ -781,7 +788,7 @@ public:
         LOGINFO("setAllCallbacks: profileType %d", profileType);
         if (!m_hdmiInInitialized && !m_aidlPorts.empty()) {
             if (TV == profileType) {
-                // AIDL listeners registered in aidlInit; just store the callbacks.
+                // AIDL listeners registered in aidlHdmiInInit; just store the callbacks.
                 if (bundle.OnHDMIInHotPlugEvent)         m_HotPlugCallback         = bundle.OnHDMIInHotPlugEvent;
                 if (bundle.OnHDMIInSignalStatusEvent)    m_SignalStatusCallback    = bundle.OnHDMIInSignalStatusEvent;
                 if (bundle.OnHDMIInStatusEvent)          m_StatusCallback          = bundle.OnHDMIInStatusEvent;
@@ -1188,7 +1195,7 @@ public:
         return WPEFramework::Core::ERROR_NONE;
     }
 
-    static bool IsAIDLAvailable()
+    static bool IsHdmiInAIDLServiceAvailable()
     {
         LOGINFO("dHdmiInAIDLImpl: Checking AIDL HAL availability");
         try {

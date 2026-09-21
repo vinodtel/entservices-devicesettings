@@ -112,7 +112,7 @@ public:
         std::shared_ptr<IPlatform> impl;
 
         // Try to use AIDL implementation if available
-        if (dHdmiInAIDLImpl::IsAIDLAvailable()) {
+        if (dHdmiInAIDLImpl::IsHdmiInAIDLServiceAvailable()) {
             LOGINFO("HdmiIn::Create - AIDL HAL is available, using dHdmiInAIDLImpl");
             impl = std::shared_ptr<dHdmiInAIDLImpl>(new dHdmiInAIDLImpl());
         } else {
