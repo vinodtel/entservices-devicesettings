@@ -121,6 +121,24 @@ private:
     uint8_t                     m_aidlPortCount{0};
     bool                        m_aidlPortArcCapable[dsHDMI_IN_PORT_MAX]{};
 
+    class AidlServiceDeathRecipient : public android::IBinder::DeathRecipient {
+    public:
+        explicit AidlServiceDeathRecipient(dHdmiInAIDLImpl* impl)
+            : m_impl(impl)
+        {
+        }
+
+        void binderDied(const android::wp<android::IBinder>&) override
+        {
+            m_impl->onAidlServiceDied();
+        }
+
+    private:
+        dHdmiInAIDLImpl* m_impl;
+    };
+
+    sp<AidlServiceDeathRecipient> m_aidlServiceDeathRecipient;
+
     // ---- Inner listener: per-port IHDMIInputController callbacks ----
     class CtrlListener : public ::com::rdk::hal::hdmiinput::BnHDMIInputControllerListener {
     public:
@@ -244,15 +262,62 @@ private:
 
     // ---- Private AIDL helper methods ----
 
+    void clearAidlStateLocked()
+    {
+        m_aidlPorts.clear();
+        m_aidlHdmiMgr = nullptr;
+        m_aidlActivePort = -1;
+        m_aidlPortCount = 0;
+        m_hdmiInInitialized = false;
+    }
+
+    void onAidlServiceDied()
+    {
+        std::lock_guard<std::mutex> lk(m_aidlMutex);
+        LOGERR("IHDMIInputManager Binder died; clearing cached AIDL interfaces");
+        clearAidlStateLocked();
+    }
+
+    bool isAidlServiceAlive()
+    {
+        sp<IHDMIInputManager> mgr;
+        {
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            mgr = m_aidlHdmiMgr;
+        }
+        return mgr && android::IInterface::asBinder(mgr)->isBinderAlive();
+    }
+
+    bool ensureAidlService()
+    {
+        if (isAidlServiceAlive()) {
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            if (!m_aidlPorts.empty()) return true;
+        }
+
+        onAidlServiceDied();
+        aidlHdmiInInit();
+
+        std::lock_guard<std::mutex> lk(m_aidlMutex);
+        return m_aidlHdmiMgr && !m_aidlPorts.empty();
+    }
+
     sp<IHDMIInputManager> getAidlHdmiMgr()
     {
         std::lock_guard<std::mutex> lk(m_aidlMutex);
-        if (!m_aidlHdmiMgr) {
+        if (!m_aidlHdmiMgr || !android::IInterface::asBinder(m_aidlHdmiMgr)->isBinderAlive()) {
+            clearAidlStateLocked();
             ProcessState::self()->startThreadPool();
             sp<android::IServiceManager> sm = defaultServiceManager();
             if (sm) {
                 m_aidlHdmiMgr = interface_cast<IHDMIInputManager>(
                     sm->getService(String16(IHDMIInputManager::serviceName().c_str())));
+                if (m_aidlHdmiMgr) {
+                    if (!m_aidlServiceDeathRecipient) {
+                        m_aidlServiceDeathRecipient = new AidlServiceDeathRecipient(this);
+                    }
+                    android::IInterface::asBinder(m_aidlHdmiMgr)->linkToDeath(m_aidlServiceDeathRecipient);
+                }
             }
         }
         return m_aidlHdmiMgr;
@@ -657,19 +722,12 @@ private:
 
     void aidlTerm()
     {
-        std::vector<AidlPortCtx> ports;
-        {
-            std::lock_guard<std::mutex> lk(m_aidlMutex);
-            ports.reserve(m_aidlPorts.size());
-            for (auto& kv : m_aidlPorts)
-                ports.emplace_back(std::move(kv.second));
-            m_aidlPorts.clear();
-            m_aidlHdmiMgr   = nullptr;
-            m_aidlActivePort = -1;
-            m_aidlPortCount = 0;
+        std::lock_guard<std::mutex> lk(m_aidlMutex);
+        if (m_aidlHdmiMgr && m_aidlServiceDeathRecipient) {
+            android::IInterface::asBinder(m_aidlHdmiMgr)->unlinkToDeath(m_aidlServiceDeathRecipient);
         }
-
-        for (auto& ctx : ports) {
+        for (auto& kv : m_aidlPorts) {
+            AidlPortCtx& ctx = kv.second;
             if (ctx.isStarted && ctx.controller) { ctx.controller->stop(); ctx.isStarted = false; }
             if (ctx.isOpen && ctx.hdmiInput && ctx.controller) {
                 bool ok = false;
@@ -681,6 +739,7 @@ private:
                 ctx.hdmiInput->unregisterEventListener(ctx.evtListener, &ok);
             }
         }
+        clearAidlStateLocked();
     }
 
     void getDynamicAutoLatencyConfig()
@@ -854,6 +913,7 @@ public:
 
     virtual uint32_t GetHDMIInNumberOfInputs(int32_t& count) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         count = static_cast<int32_t>(m_aidlPortCount);
         LOGINFO("GetHDMIInNumberOfInputs: count=%d (AIDL)", count);
         return WPEFramework::Core::ERROR_NONE;
@@ -861,6 +921,7 @@ public:
 
     uint32_t GetHDMIInStatus(HDMIInStatus& hdmiStatus, IHDMIInPortConnectionStatusIterator*& portConnectionStatus) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         std::vector<DeviceSettingsHDMIIn::HDMIPortConnectionStatus> portStatuses;
         {
             std::lock_guard<std::mutex> lk(m_aidlMutex);
@@ -898,6 +959,7 @@ public:
 
     uint32_t GetSupportedGameFeaturesList(IHDMIInGameFeatureListIterator*& gameFeatureList) override
     {
+        if (!ensureAidlService()) { gameFeatureList = nullptr; return WPEFramework::Core::ERROR_UNAVAILABLE; }
         std::vector<sp<IHDMIInput>> inputs;
         {
             std::lock_guard<std::mutex> lk(m_aidlMutex);
@@ -955,6 +1017,7 @@ public:
 
     uint32_t GetHDMIInAllmStatus(const HDMIInPort port, bool& allmStatus) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
         {
@@ -1000,6 +1063,7 @@ public:
 
     uint32_t GetEdidBytes(const HDMIInPort port, const uint16_t edidBytesLength, uint8_t edidBytes[]) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
         {
@@ -1022,6 +1086,7 @@ public:
 
     uint32_t GetHDMISPDInformation(const HDMIInPort port, const uint16_t spdBytesLength, uint8_t spdBytes[]) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
         {
@@ -1044,6 +1109,7 @@ public:
 
     uint32_t GetHDMIEdidVersion(const HDMIInPort port, HDMIInEdidVersion& edidVersion) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
         {
@@ -1063,6 +1129,7 @@ public:
 
     uint32_t SetHDMIEdidVersion(const HDMIInPort port, const HDMIInEdidVersion edidVersion) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort    = static_cast<dsHdmiInPort_t>(port);
         tv_hdmi_edid_version_t ver = static_cast<tv_hdmi_edid_version_t>(edidVersion);
 
@@ -1107,6 +1174,7 @@ public:
 
     uint32_t GetHDMIVideoMode(HDMIVideoPortResolution& videoPortResolution) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         int vic = 0;
         {
             std::lock_guard<std::mutex> lk(m_aidlMutex);
@@ -1129,6 +1197,7 @@ public:
 
     uint32_t GetHDMIVersion(const HDMIInPort port, HDMIInCapabilityVersion& capabilityVersion) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
         {
@@ -1181,6 +1250,7 @@ public:
 
     uint32_t GetVRRStatus(const HDMIInPort port, HDMIInVRRStatus& vrrStatus) override
     {
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         std::lock_guard<std::mutex> lk(m_aidlMutex);
         auto it = m_aidlPorts.find((int)hdmiPort);
