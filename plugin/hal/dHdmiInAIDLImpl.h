@@ -92,6 +92,7 @@ private:
         int    lastVIC{0};
         bool   vrrActive{false};
         double vrrFrameRate{0.0};
+        std::vector<uint8_t> spdInfoFrame;
     };
 
     // ---- Instance state (replacing file-scope statics from dHdmiInImpl) ----
@@ -148,7 +149,11 @@ private:
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 auto it = m_impl->m_aidlPorts.find(m_portId);
-                if (it != m_impl->m_aidlPorts.end()) it->second.connected = connected;
+                if (it != m_impl->m_aidlPorts.end()) {
+                    if (!connected || !it->second.connected)
+                        it->second.spdInfoFrame.clear();
+                    it->second.connected = connected;
+                }
             }
             if (m_impl->m_HotPlugCallback)
                 m_impl->m_HotPlugCallback(
@@ -224,7 +229,13 @@ private:
         }
 
         ::android::binder::Status onAudioInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
-        ::android::binder::Status onSPDInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
+        ::android::binder::Status onSPDInfoFrame(const std::vector<uint8_t>& data) override {
+            std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
+            auto it = m_impl->m_aidlPorts.find(m_portId);
+            if (it != m_impl->m_aidlPorts.end())
+                it->second.spdInfoFrame = data;
+            return ::android::binder::Status::ok();
+        }
         ::android::binder::Status onDRMInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
         ::android::binder::Status onVendorSpecificInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
         ::android::binder::Status onHDCPStatusChanged(
@@ -1089,17 +1100,26 @@ public:
         if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         dsHdmiInPort_t hdmiPort = static_cast<dsHdmiInPort_t>(port);
         sp<IHDMIInput> hi;
+        std::vector<uint8_t> spdVec;
         {
             std::lock_guard<std::mutex> lk(m_aidlMutex);
             auto it = m_aidlPorts.find((int)hdmiPort);
             if (it == m_aidlPorts.end() || !it->second.hdmiInput) return WPEFramework::Core::ERROR_GENERAL;
             hi = it->second.hdmiInput;
+            spdVec = it->second.spdInfoFrame;
         }
-        std::vector<uint8_t> spdVec;
-        if (!hi->getSPDInfoFrame(&spdVec).isOk() || spdVec.empty()) {
-            LOGERR("GetHDMISPDInformation: getSPDInfoFrame failed for port %d", (int)hdmiPort);
-            return WPEFramework::Core::ERROR_GENERAL;
+
+        if (spdVec.empty()) {
+            if (!hi->getSPDInfoFrame(&spdVec).isOk() || spdVec.empty()) {
+                LOGERR("GetHDMISPDInformation: getSPDInfoFrame failed for port %d", (int)hdmiPort);
+                return WPEFramework::Core::ERROR_GENERAL;
+            }
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            auto it = m_aidlPorts.find((int)hdmiPort);
+            if (it != m_aidlPorts.end())
+                it->second.spdInfoFrame = spdVec;
         }
+
         memset(spdBytes, 0, spdBytesLength);
         size_t copyLen = std::min(spdVec.size(), (size_t)spdBytesLength);
         memcpy(spdBytes, spdVec.data(), copyLen);
