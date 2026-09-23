@@ -179,11 +179,17 @@ private:
 
         ::android::binder::Status onVIChanged(::com::rdk::hal::hdmiinput::VIC vic) override {
             LOGINFO("AIDL HDMI-In video mode event received: port=%d, VIC=%d", m_portId, (int)vic);
+            bool stored = false;
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 auto it = m_impl->m_aidlPorts.find(m_portId);
-                if (it != m_impl->m_aidlPorts.end()) it->second.lastVIC = (int)vic;
+                if (it != m_impl->m_aidlPorts.end()) {
+                    it->second.lastVIC = (int)vic;
+                    stored = true;
+                }
             }
+            LOGINFO("AIDL HDMI-In VIC storage: port=%d, VIC=%d, stored=%s",
+                    m_portId, (int)vic, stored ? "true" : "false");
             if (m_impl->m_VideoModeUpdateCallback) {
                 dsVideoPortResolution_t dsRes;
                 dHdmiInAIDLImpl::aidlVicToRes(vic, dsRes);
@@ -277,11 +283,15 @@ private:
             LOGINFO("AIDL HDMI-In status event received: port=%d, oldState=%d, newState=%d",
                     m_portId, (int)oldState, (int)newState);
             bool presented = (newState == ::com::rdk::hal::hdmiinput::State::STARTED);
+            int activePort = -1;
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 if (presented) m_impl->m_aidlActivePort = m_portId;
                 else if (m_impl->m_aidlActivePort == m_portId) m_impl->m_aidlActivePort = -1;
+                activePort = m_impl->m_aidlActivePort;
             }
+            LOGINFO("AIDL HDMI-In active port after state event: port=%d, activePort=%d",
+                    m_portId, activePort);
             if (m_impl->m_StatusCallback)
                 m_impl->m_StatusCallback(
                     static_cast<DeviceSettingsHDMIIn::HDMIInPort>(m_portId), presented);
@@ -1221,11 +1231,17 @@ public:
     {
         if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
         int vic = 0;
+        int activePort = -1;
+        bool portFound = false;
         {
             std::lock_guard<std::mutex> lk(m_aidlMutex);
-            if (m_aidlActivePort >= 0) {
-                auto it = m_aidlPorts.find(m_aidlActivePort);
-                if (it != m_aidlPorts.end()) vic = it->second.lastVIC;
+            activePort = m_aidlActivePort;
+            if (activePort >= 0) {
+                auto it = m_aidlPorts.find(activePort);
+                if (it != m_aidlPorts.end()) {
+                    vic = it->second.lastVIC;
+                    portFound = true;
+                }
             }
         }
         dsVideoPortResolution_t dsRes;
@@ -1236,7 +1252,8 @@ public:
         videoPortResolution.stereoScopicMode = static_cast<HDMIInVideoStereoScopicMode>(dsRes.stereoScopicMode);
         videoPortResolution.frameRate        = static_cast<HDMIInVideoFrameRate>(dsRes.frameRate);
         videoPortResolution.interlaced       = dsRes.interlaced;
-        LOGINFO("GetHDMIVideoMode (AIDL): VIC=%d", vic);
+        LOGINFO("GetHDMIVideoMode (AIDL): activePort=%d, portFound=%s, VIC=%d",
+            activePort, portFound ? "true" : "false", vic);
         return WPEFramework::Core::ERROR_NONE;
     }
 
