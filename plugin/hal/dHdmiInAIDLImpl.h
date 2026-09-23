@@ -146,6 +146,7 @@ private:
         CtrlListener(int portId, dHdmiInAIDLImpl* impl) : m_portId(portId), m_impl(impl) {}
 
         ::android::binder::Status onConnectionStateChanged(bool connected) override {
+            LOGINFO("AIDL HDMI-In hot plug event received: port=%d, connected=%s", m_portId, connected ? "true" : "false");
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 auto it = m_impl->m_aidlPorts.find(m_portId);
@@ -163,6 +164,7 @@ private:
 
         ::android::binder::Status onSignalStateChanged(
                 ::com::rdk::hal::hdmiinput::SignalState signalState) override {
+            LOGINFO("AIDL HDMI-In signal status event received: port=%d, signalState=%d", m_portId, (int)signalState);
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 auto it = m_impl->m_aidlPorts.find(m_portId);
@@ -176,6 +178,7 @@ private:
         }
 
         ::android::binder::Status onVIChanged(::com::rdk::hal::hdmiinput::VIC vic) override {
+            LOGINFO("AIDL HDMI-In video mode event received: port=%d, VIC=%d", m_portId, (int)vic);
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
                 auto it = m_impl->m_aidlPorts.find(m_portId);
@@ -199,6 +202,8 @@ private:
 
         ::android::binder::Status onVRRChanged(
                 bool vrrActive, bool /*mConst*/, bool /*fastV*/, double frameRate) override {
+            LOGINFO("AIDL HDMI-In VRR event received: port=%d, active=%s, frameRate=%.2f",
+                m_portId, vrrActive ? "true" : "false", frameRate);
             dsVRRType_t vrrType = vrrActive
                 ? (frameRate > 0.0 ? dsVRR_AMD_FREESYNC : dsVRR_HDMI_VRR)
                 : dsVRR_NONE;
@@ -218,6 +223,7 @@ private:
         }
 
         ::android::binder::Status onAVIInfoFrame(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In AVI content type event received: port=%d, length=%zu", m_portId, data.size());
             dsAviContentType_t ct = dsAVICONTENT_TYPE_NOT_SIGNALLED;
             if (!dHdmiInAIDLImpl::aidlParseAviContentType(data, &ct))
                 return ::android::binder::Status::ok();
@@ -228,19 +234,33 @@ private:
             return ::android::binder::Status::ok();
         }
 
-        ::android::binder::Status onAudioInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
+        ::android::binder::Status onAudioInfoFrame(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In audio info frame event received: port=%d, length=%zu", m_portId, data.size());
+            return ::android::binder::Status::ok();
+        }
         ::android::binder::Status onSPDInfoFrame(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In SPD info frame event received: port=%d, length=%zu", m_portId, data.size());
             std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
             auto it = m_impl->m_aidlPorts.find(m_portId);
             if (it != m_impl->m_aidlPorts.end())
                 it->second.spdInfoFrame = data;
             return ::android::binder::Status::ok();
         }
-        ::android::binder::Status onDRMInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
-        ::android::binder::Status onVendorSpecificInfoFrame(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
+        ::android::binder::Status onDRMInfoFrame(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In DRM info frame event received: port=%d, length=%zu", m_portId, data.size());
+            return ::android::binder::Status::ok();
+        }
+        ::android::binder::Status onVendorSpecificInfoFrame(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In vendor specific info frame event received: port=%d, length=%zu", m_portId, data.size());
+            return ::android::binder::Status::ok();
+        }
         ::android::binder::Status onHDCPStatusChanged(
-                ::com::rdk::hal::hdmiinput::HDCPStatus,
-                ::com::rdk::hal::hdmiinput::HDCPProtocolVersion) override { return ::android::binder::Status::ok(); }
+                ::com::rdk::hal::hdmiinput::HDCPStatus status,
+                ::com::rdk::hal::hdmiinput::HDCPProtocolVersion version) override {
+            LOGINFO("AIDL HDMI-In HDCP status event received: port=%d, status=%d, version=%d",
+                    m_portId, (int)status, (int)version);
+            return ::android::binder::Status::ok();
+        }
     private:
         int m_portId;
         dHdmiInAIDLImpl* m_impl;
@@ -252,8 +272,10 @@ private:
         EvtListener(int portId, dHdmiInAIDLImpl* impl) : m_portId(portId), m_impl(impl) {}
 
         ::android::binder::Status onStateChanged(
-                ::com::rdk::hal::hdmiinput::State /*oldState*/,
+                ::com::rdk::hal::hdmiinput::State oldState,
                 ::com::rdk::hal::hdmiinput::State newState) override {
+            LOGINFO("AIDL HDMI-In status event received: port=%d, oldState=%d, newState=%d",
+                    m_portId, (int)oldState, (int)newState);
             bool presented = (newState == ::com::rdk::hal::hdmiinput::State::STARTED);
             {
                 std::lock_guard<std::mutex> lk(m_impl->m_aidlMutex);
@@ -265,7 +287,10 @@ private:
                     static_cast<DeviceSettingsHDMIIn::HDMIInPort>(m_portId), presented);
             return ::android::binder::Status::ok();
         }
-        ::android::binder::Status onEDIDChange(const std::vector<uint8_t>&) override { return ::android::binder::Status::ok(); }
+        ::android::binder::Status onEDIDChange(const std::vector<uint8_t>& data) override {
+            LOGINFO("AIDL HDMI-In EDID change event received: port=%d, length=%zu", m_portId, data.size());
+            return ::android::binder::Status::ok();
+        }
     private:
         int m_portId;
         dHdmiInAIDLImpl* m_impl;
