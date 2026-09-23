@@ -987,8 +987,60 @@ public:
 
     uint32_t SelectHDMIInPort(const HDMIInPort port, const bool requestAudioMix, const bool topMostPlane, const HDMIVideoPlaneType videoPlaneType) override
     {
-        LOGINFO("SelectHDMIInPort: on hold pending PlaneControl/AudioMixer (AIDL)");
-        return WPEFramework::Core::ERROR_UNAVAILABLE;
+        if (!ensureAidlService()) return WPEFramework::Core::ERROR_UNAVAILABLE;
+
+        const int portId = static_cast<int>(port);
+        sp<IHDMIInput> hdmiInput;
+        sp<IHDMIInputController> controller;
+        sp<IHDMIInputControllerListener> controllerListener;
+        sp<IHDMIInputController> activeController;
+        int activePort = -1;
+        bool alreadyStarted = false;
+
+        {
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            auto selected = m_aidlPorts.find(portId);
+            if (selected == m_aidlPorts.end() || !selected->second.hdmiInput) {
+                LOGERR("SelectHDMIInPort: invalid port %d", portId);
+                return WPEFramework::Core::ERROR_GENERAL;
+            }
+
+            hdmiInput = selected->second.hdmiInput;
+            controller = selected->second.controller;
+            controllerListener = selected->second.ctrlListener;
+            alreadyStarted = selected->second.isStarted;
+            activePort = m_aidlActivePort;
+            if (activePort != portId) {
+                auto active = m_aidlPorts.find(activePort);
+                if (active != m_aidlPorts.end() && active->second.isStarted)
+                    activeController = active->second.controller;
+            }
+        }
+
+        if (activeController && !activeController->stop().isOk()) {
+            LOGERR("SelectHDMIInPort: stop failed for active port %d", activePort);
+            return WPEFramework::Core::ERROR_GENERAL;
+        }
+
+        if (!alreadyStarted && !controller->start().isOk()) {
+            LOGERR("SelectHDMIInPort: start failed for port %d", portId);
+            return WPEFramework::Core::ERROR_GENERAL;
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(m_aidlMutex);
+            if (activePort != portId) {
+                auto active = m_aidlPorts.find(activePort);
+                if (active != m_aidlPorts.end()) active->second.isStarted = false;
+            }
+            auto selected = m_aidlPorts.find(portId);
+            if (selected != m_aidlPorts.end()) selected->second.isStarted = true;
+            m_aidlActivePort = portId;
+        }
+
+        LOGINFO("SelectHDMIInPort: port=%d selected; requestAudioMix=%s, topMostPlane=%s, videoPlaneType=%d are not supported by the HDMI-input AIDL interface",
+                portId, requestAudioMix ? "true" : "false", topMostPlane ? "true" : "false", videoPlaneType);
+        return WPEFramework::Core::ERROR_NONE;
     }
 
     uint32_t ScaleHDMIInVideo(const HDMIInVideoRectangle videoPosition) override
