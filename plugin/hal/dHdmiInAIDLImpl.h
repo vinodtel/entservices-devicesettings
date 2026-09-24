@@ -194,7 +194,7 @@ private:
                 dsVideoPortResolution_t dsRes;
                 dHdmiInAIDLImpl::aidlVicToRes(vic, dsRes);
                 DeviceSettingsHDMIIn::HDMIVideoPortResolution res;
-                res.name             = "";
+                res.name             = CreateResolutionStr(dsRes);
                 res.pixelResolution  = static_cast<DeviceSettingsHDMIIn::HDMIInVideoResolution>(dsRes.pixelResolution);
                 res.aspectRatio      = static_cast<DeviceSettingsHDMIIn::HDMIVideoAspectRatio>(dsRes.aspectRatio);
                 res.stereoScopicMode = static_cast<DeviceSettingsHDMIIn::HDMIInVideoStereoScopicMode>(dsRes.stereoScopicMode);
@@ -367,6 +367,139 @@ private:
             }
         }
         return m_aidlHdmiMgr;
+    }
+
+    static std::string getResolutionStr (dsVideoResolution_t resolution)
+    {
+        std::string resolutionStr;
+
+        switch (resolution)
+        {
+            case dsVIDEO_PIXELRES_720x480:
+                resolutionStr = "480";
+                break;
+
+            case dsVIDEO_PIXELRES_720x576:
+                resolutionStr = "576";
+                break;
+
+            case dsVIDEO_PIXELRES_1280x720:
+                resolutionStr = "720";
+                break;
+
+            case dsVIDEO_PIXELRES_1366x768:
+                resolutionStr = "1366x768";
+                break;
+
+            case dsVIDEO_PIXELRES_1920x1080:
+                resolutionStr = "1080";
+                break;
+
+            case dsVIDEO_PIXELRES_3840x2160:
+                resolutionStr = "3840x2160";
+                break;
+
+            case dsVIDEO_PIXELRES_4096x2160:
+                resolutionStr = "4096x2160";
+                break;
+
+            default:
+                resolutionStr = "unknown";
+                break;
+        }
+
+        LOGINFO("ResolutionStr: %s", resolutionStr.c_str());
+        return resolutionStr;
+    }
+
+    static std::string getFrameRateStr (dsVideoFrameRate_t frameRate)
+    {
+        std::string FrameRateStr;
+
+        switch (frameRate)
+        {
+            case dsVIDEO_FRAMERATE_24:
+                FrameRateStr = "24";
+                break;
+
+            case dsVIDEO_FRAMERATE_25:
+                FrameRateStr = "25";
+                break;
+
+            case dsVIDEO_FRAMERATE_30:
+                FrameRateStr = "30";
+                break;
+
+            case dsVIDEO_FRAMERATE_60:
+                FrameRateStr = "60";
+                break;
+
+            case dsVIDEO_FRAMERATE_23dot98:
+                FrameRateStr = "23.98";
+                break;
+
+            case dsVIDEO_FRAMERATE_29dot97:
+                FrameRateStr = "29.97";
+                break;
+
+            case dsVIDEO_FRAMERATE_50:
+                FrameRateStr = "50";
+                break;
+
+            case dsVIDEO_FRAMERATE_59dot94:
+                FrameRateStr = "59.94";
+                break;
+
+            case dsVIDEO_FRAMERATE_100:
+                FrameRateStr = "100";
+                break;
+
+            case dsVIDEO_FRAMERATE_119dot88:
+                FrameRateStr = "119.88";
+                break;
+
+            case dsVIDEO_FRAMERATE_120:
+                FrameRateStr = "120";
+                break;
+
+            case dsVIDEO_FRAMERATE_200:
+                FrameRateStr = "200";
+                break;
+
+            case dsVIDEO_FRAMERATE_239dot76:
+                FrameRateStr = "239.76";
+                break;
+
+            case dsVIDEO_FRAMERATE_240:
+                FrameRateStr = "240";
+                break;
+
+            default:
+                // Not all video formats have a specified framerate.
+                break;
+        }
+
+        LOGINFO("FrameRateStr: %s", FrameRateStr.c_str());
+        return FrameRateStr;
+    }
+
+    static std::string getInterlacedStr (bool interlaced)
+    {
+        std::string InterlacedStr = (interlaced) ? "i" : "p";
+        LOGINFO("InterlacedStr: %s", InterlacedStr.c_str());
+        return InterlacedStr;
+    }
+
+    static std::string CreateResolutionStr (const dsVideoPortResolution_t &resolution)
+    {
+        std::string resolutionStr = getResolutionStr(resolution.pixelResolution);
+        if(resolutionStr.compare("unknown") != 0){
+            resolutionStr = getResolutionStr(resolution.pixelResolution) +
+                                    getInterlacedStr(resolution.interlaced) +
+                                    getFrameRateStr(resolution.frameRate);
+        }
+        LOGINFO("resolutionStr : %s", resolutionStr.c_str());
+        return resolutionStr;
     }
 
     // Map VIC code to dsVideoPortResolution_t for callback conversion.
@@ -1298,7 +1431,7 @@ public:
         }
         dsVideoPortResolution_t dsRes;
         aidlVicToRes((::com::rdk::hal::hdmiinput::VIC)vic, dsRes);
-        videoPortResolution.name             = "";
+        videoPortResolution.name             = CreateResolutionStr(dsRes);
         videoPortResolution.pixelResolution  = static_cast<HDMIInVideoResolution>(dsRes.pixelResolution);
         videoPortResolution.aspectRatio      = static_cast<HDMIVideoAspectRatio>(dsRes.aspectRatio);
         videoPortResolution.stereoScopicMode = static_cast<HDMIInVideoStereoScopicMode>(dsRes.stereoScopicMode);
