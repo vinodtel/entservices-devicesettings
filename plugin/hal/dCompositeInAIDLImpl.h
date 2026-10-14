@@ -17,8 +17,6 @@ public:
     dCompositeInAIDLImpl(const dCompositeInAIDLImpl&) = delete;
     dCompositeInAIDLImpl& operator=(const dCompositeInAIDLImpl&) = delete;
 
-    static bool IsAvailable();
-
     void InitialiseHAL() override;
     void DeInitialiseHAL() override;
     void setAllCallbacks(const CallbackBundle& bundle) override;
