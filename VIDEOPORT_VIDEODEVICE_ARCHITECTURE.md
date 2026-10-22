@@ -120,7 +120,7 @@ flowchart TB
 | Get handle | `VideoDevice::GetVideoDeviceHandle` | fixed handle for default `IHDMIOutput` | `dsGetVideoDevice` |
 | Zoom/DFC | `SetVideoDeviceDFC` / `GetVideoDeviceDFC` | unsupported (cached only; requires `IPlaneControl`) | `dsSetDFC` / `dsGetDFC` |
 | HDR capabilities | `GetHDRCapabilities` | `IHDMIOutput::getCapabilities().supportedHDROutputModes` | `dsGetHDRCapabilities` |
-| Display frame rate | `GetCurrentDisplayFrameRate` / `SetDisplayFrameRate` | derived from/applied to `VIC` property | `dsGetCurrentDisplayframerate` / `dsSetDisplayframerate` |
+| Display frame rate | `GetCurrentDisplayFrameRate` / `SetDisplayFrameRate` | get: derived from `VIC` property (read-only); set: unsupported (needs `IPanelOutput.setRefreshRate`) | `dsGetCurrentDisplayframerate` / `dsSetDisplayframerate` |
 
 ## Event Mapping
 
@@ -350,7 +350,7 @@ sequenceDiagram
         SM-->>FactoryVD: manager binder
         FactoryVD->>AIDLVD: construct
         AIDLVD->>SM: getHDMIOutputIds / getHDMIOutput
-        AIDLVD->>AIDLVD: open(controllerListener) + start() + registerEventListener
+        AIDLVD->>AIDLVD: acquire HDMI output read-only (no open/start/registerEventListener; VideoPort owns them)
         FactoryVD-->>CVD: VideoDevice(AIDL platform)
     else AIDL manager is unavailable
         SM-->>FactoryVD: null
