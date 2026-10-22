@@ -153,8 +153,22 @@ bool dVideoDeviceAIDLImpl::OpenDevice(const Output::Id& id, Device& device)
     bool registered = false;
     device.output->registerEventListener(device.eventListener, &registered);
 
-    if (!device.output->open(device.controllerListener, &device.controller).isOk() || device.controller == nullptr) {
-        DSLOG_ERR("open() failed on HDMI output id=%d", id.value);
+    HdmiOutput::State state = HdmiOutput::State::UNKNOWN;
+    const auto stateStatus = device.output->getState(&state);
+    if (stateStatus.isOk()) {
+        DSLOG_INFO("Before VideoDevice open: HDMI output id=%d, state=%d", id.value, static_cast<int>(state));
+    } else {
+        DSLOG_ERR("getState() failed on HDMI output id=%d: %s", id.value, stateStatus.toString8().c_str());
+    }
+
+    const auto openStatus = device.output->open(device.controllerListener, &device.controller);
+    if (!openStatus.isOk()) {
+        DSLOG_ERR("open() failed on HDMI output id=%d: %s", id.value, openStatus.toString8().c_str());
+        CloseDevice(device);
+        return false;
+    }
+    if (device.controller == nullptr) {
+        DSLOG_ERR("open() returned a null controller on HDMI output id=%d", id.value);
         CloseDevice(device);
         return false;
     }
