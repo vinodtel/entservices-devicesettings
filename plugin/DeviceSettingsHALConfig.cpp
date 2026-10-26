@@ -592,6 +592,11 @@ void PopulateVideoPortConfig(
     videoPorts.clear();
 
     if (!loadedFromHAL) {
+#ifdef ENABLE_HDMIOUTPUT_AIDL
+        if (PopulateVideoPortConfigFromAIDL(videoPortTypes, videoPorts)) {
+            return;
+        }
+#endif
         DSLOG_WARN("HAL config not available, returning empty config");
         return;
     }
@@ -653,6 +658,11 @@ void PopulateVideoPortResolutionConfig(
     resolutions.clear();
 
     if (!loadedFromHAL) {
+#ifdef ENABLE_HDMIOUTPUT_AIDL
+        if (PopulateVideoPortResolutionConfigFromAIDL(videoPortType, resolutions)) {
+            return;
+        }
+#endif
         DSLOG_WARN("HAL config not available, returning empty config");
         return;
     }
@@ -778,6 +788,11 @@ void PopulateVideoDeviceConfig(
     videoDeviceConfigs.clear();
 
     if (!loadedFromHAL) {
+#ifdef ENABLE_HDMIOUTPUT_AIDL
+        if (PopulateVideoDeviceConfigFromAIDL(videoDeviceConfigs)) {
+            return;
+        }
+#endif
         DSLOG_WARN("HAL config not available, returning empty config");
         return;
     }

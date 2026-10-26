@@ -208,6 +208,36 @@ bool HdmiOutputHelper::GetOutputIds(std::vector<int32_t>& ids)
     return true;
 }
 
+bool HdmiOutputHelper::GetOutputCapabilities(const int32_t outputId, com::rdk::hal::hdmioutput::Capabilities& capabilities)
+{
+    std::lock_guard<std::mutex> open(_openLock);
+    if (!EnsureManager()) {
+        return false;
+    }
+    Entry* entry = GetOrCreateEntry(outputId);
+    if (entry == nullptr || entry->output == nullptr) {
+        return false;
+    }
+    if (!entry->output->getCapabilities(&capabilities).isOk()) {
+        DSLOG_ERR("getCapabilities failed for HDMI output id=%d", outputId);
+        return false;
+    }
+    return true;
+}
+
+bool HdmiOutputHelper::GetPlatformCapabilities(com::rdk::hal::hdmioutput::PlatformCapabilities& capabilities)
+{
+    std::lock_guard<std::mutex> open(_openLock);
+    if (!EnsureManager()) {
+        return false;
+    }
+    if (!_manager->getCapabilities(&capabilities).isOk()) {
+        DSLOG_ERR("IHDMIOutputManager.getCapabilities failed");
+        return false;
+    }
+    return true;
+}
+
 HdmiOutputHelper::Entry* HdmiOutputHelper::FindEntry(const int32_t id)
 {
     // Entries are only inserted while _openLock is held, so reading under _openLock is safe.

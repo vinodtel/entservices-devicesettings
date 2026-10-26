@@ -18,6 +18,7 @@
  */
 #include "dVideoPortAIDLImpl.h"
 #include "DeviceSettingsTypes.h"
+#include "DeviceSettingsHALConfig.h"
 #include "DeviceSettingsHdmiStatus.h"
 #include <dsDisplay.h>
 
@@ -34,7 +35,10 @@
 #include <com/rdk/hal/hdmioutput/State.h>
 #include <com/rdk/hal/hdmioutput/VIC.h>
 
+#include <atomic>
 #include <cstring>
+#include <set>
+#include <string>
 
 namespace HdmiOutput = com::rdk::hal::hdmioutput;
 using PropertyValue = com::rdk::hal::PropertyValue;
@@ -955,3 +959,209 @@ void dVideoPortAIDLImpl::OnStateChanged(const int32_t handle, HdmiOutput::State 
 {
     DSLOG_INFO("outputId=%d, oldState=%d, newState=%d", handle, static_cast<int>(oldState), static_cast<int>(newState));
 }
+
+// ---------------------------------------------------------------------------
+// Config vectors built from IHDMIOutput.getCapabilities(). The DS HAL config tables
+// (kVideoPortConfigs, ...) do not exist with the AIDL HAL, so DeviceSettingsHAL::Populate*
+// fall back to these when the dlsym lookup fails.
+// ---------------------------------------------------------------------------
+namespace {
+template <typename T>
+std::string JoinValues(const std::vector<T>& values)
+{
+    std::string out;
+    for (const auto& value : values) {
+        if (!out.empty()) {
+            out += ",";
+        }
+        out += std::to_string(static_cast<int>(value));
+    }
+    return out;
+}
+
+const VicResolutionEntry* FindVicEntry(const HdmiOutput::VIC vic)
+{
+    for (const auto& entry : kVicTable) {
+        if (entry.vic == vic) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+void LogCapabilities(const int32_t id, const HdmiOutput::Capabilities& caps)
+{
+    std::string vics;
+    for (const auto vic : caps.supportedVICs) {
+        const VicResolutionEntry* entry = FindVicEntry(vic);
+        if (!vics.empty()) {
+            vics += ",";
+        }
+        vics += std::to_string(static_cast<int>(vic)) + "(" + (entry ? entry->name : "unmapped") + ")";
+    }
+
+    DSLOG_INFO("---- IHDMIOutput.getCapabilities() outputId=%d ----", id);
+    DSLOG_INFO("supportedVersions=[%s]", JoinValues(caps.supportedVersions).c_str());
+    DSLOG_INFO("supportedVICs(%zu)=[%s]", caps.supportedVICs.size(), vics.c_str());
+    DSLOG_INFO("supportedHDROutputModes=[%s] supportsForcedHDROutputModes=%d",
+        JoinValues(caps.supportedHDROutputModes).c_str(), caps.supportsForcedHDROutputModes);
+    DSLOG_INFO("supportedHDCPProtocolVersions=[%s]", JoinValues(caps.supportedHDCPProtocolVersions).c_str());
+    DSLOG_INFO("supportedColorimetries=[%s] supportedExtendedColorimetries=[%s] supportedAdditionalColorimetryExtensions=[%s]",
+        JoinValues(caps.supportedColorimetries).c_str(),
+        JoinValues(caps.supportedExtendedColorimetries).c_str(),
+        JoinValues(caps.supportedAdditionalColorimetryExtensions).c_str());
+    DSLOG_INFO("supportedColorDepths=[%s] supportedPixelFormats=[%s]",
+        JoinValues(caps.supportedColorDepths).c_str(), JoinValues(caps.supportedPixelFormats).c_str());
+    DSLOG_INFO("supports3D=%d supportsFRL=%d supportsVRR=%d supportsFreeSync=%d supportsQMS=%d supportsALLM=%d supportsQFT=%d",
+        caps.supports3D, caps.supportsFRL, caps.supportsVRR, caps.supportsFreeSync,
+        caps.supportsQMS, caps.supportsALLM, caps.supportsQFT);
+}
+
+// Reads (and logs, once per process) the capabilities of every HDMI output.
+bool GetAllCapabilities(std::vector<int32_t>& ids, std::vector<HdmiOutput::Capabilities>& caps)
+{
+    static std::atomic<bool> logged { false };
+
+    if (!HdmiOutputHelper::Instance().GetOutputIds(ids) || ids.empty()) {
+        DSLOG_ERR("no HDMI outputs reported by getHDMIOutputIds");
+        return false;
+    }
+    caps.assign(ids.size(), HdmiOutput::Capabilities());
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (!HdmiOutputHelper::Instance().GetOutputCapabilities(ids[i], caps[i])) {
+            return false;
+        }
+    }
+
+    if (!logged.exchange(true)) {
+        HdmiOutput::PlatformCapabilities platformCaps;
+        if (HdmiOutputHelper::Instance().GetPlatformCapabilities(platformCaps)) {
+            DSLOG_INFO("---- IHDMIOutputManager.getCapabilities() nativeFrameRate=%f freeSync=%d ----",
+                platformCaps.nativeFrameRate, static_cast<int>(platformCaps.freeSync));
+        }
+        for (size_t i = 0; i < ids.size(); ++i) {
+            LogCapabilities(ids[i], caps[i]);
+        }
+    }
+    return true;
+}
+
+// Resolution entries for the VICs supported by any output, without duplicates.
+std::vector<const VicResolutionEntry*> CollectResolutions(const std::vector<HdmiOutput::Capabilities>& caps)
+{
+    std::vector<const VicResolutionEntry*> entries;
+    std::set<std::string> seen;
+    for (const auto& cap : caps) {
+        for (const auto vic : cap.supportedVICs) {
+            const VicResolutionEntry* entry = FindVicEntry(vic);
+            if (entry != nullptr && seen.insert(entry->name).second) {
+                entries.push_back(entry);
+            }
+        }
+    }
+    return entries;
+}
+}
+
+namespace DeviceSettingsHAL {
+
+bool PopulateVideoPortConfigFromAIDL(
+    std::vector<VideoPortTypeConfig>& videoPortTypes,
+    std::vector<VideoPortPortConfig>& videoPorts)
+{
+    std::vector<int32_t> ids;
+    std::vector<HdmiOutput::Capabilities> caps;
+    if (!GetAllCapabilities(ids, caps)) {
+        return false;
+    }
+
+    const auto resolutions = CollectResolutions(caps);
+    std::string names;
+    bool hdcpSupported = false;
+    for (const auto* entry : resolutions) {
+        names += (names.empty() ? "" : ",");
+        names += entry->name;
+    }
+    for (const auto& cap : caps) {
+        hdcpSupported = hdcpSupported || !cap.supportedHDCPProtocolVersions.empty();
+    }
+
+    VideoPortTypeConfig typeCfg;
+    typeCfg.typeId = VideoPortType::DS_VIDEO_PORT_TYPE_HDMI;
+    typeCfg.name = "HDMI";
+    typeCfg.dtcpSupported = false;
+    typeCfg.hdcpSupported = hdcpSupported;
+    typeCfg.restrictedResolution = -1;
+    typeCfg.supportedResolutionNames = names;
+    videoPortTypes.push_back(typeCfg);
+
+    // The HAL has no default resolution; use the same default as getPersistenceValue().
+    std::string defaultResolution = (profileType == TV) ? "2160p" : "1080p";
+    if (!resolutions.empty() && (names.find(defaultResolution) == std::string::npos)) {
+        defaultResolution = resolutions.back()->name;
+    }
+
+    for (size_t i = 0; i < ids.size(); ++i) {
+        VideoPortPortConfig portCfg;
+        portCfg.videoPortType = VideoPortType::DS_VIDEO_PORT_TYPE_HDMI;
+        portCfg.videoPortIndex = static_cast<int32_t>(i);
+        portCfg.connectedAudioPortType = static_cast<int32_t>(AudioPortType::AUDIO_PORT_TYPE_HDMI);
+        portCfg.connectedAudioPortIndex = static_cast<int32_t>(i);
+        portCfg.defaultResolution = defaultResolution;
+        videoPorts.push_back(portCfg);
+    }
+
+    DSLOG_INFO("Built config from HDMI Output capabilities (videoPortTypes=%zu videoPorts=%zu)",
+        videoPortTypes.size(), videoPorts.size());
+    return true;
+}
+
+bool PopulateVideoPortResolutionConfigFromAIDL(
+    const VideoPortType videoPortType,
+    std::vector<VideoPortResolution>& resolutions)
+{
+    if (videoPortType != VideoPortType::DS_VIDEO_PORT_TYPE_HDMI) {
+        return false;
+    }
+    std::vector<int32_t> ids;
+    std::vector<HdmiOutput::Capabilities> caps;
+    if (!GetAllCapabilities(ids, caps)) {
+        return false;
+    }
+
+    for (const auto* entry : CollectResolutions(caps)) {
+        VideoPortResolution resCfg;
+        resCfg.name = entry->name;
+        resCfg.pixelResolution = entry->pixelResolution;
+        resCfg.aspectRatio = entry->aspectRatio;
+        resCfg.stereoScopicMode = VideoStereoScopicMode::DS_VIDEO_SSMODE_2D;
+        resCfg.frameRate = entry->frameRate;
+        resCfg.interlaced = entry->interlaced;
+        resolutions.push_back(resCfg);
+    }
+    DSLOG_INFO("Built resolution config from HDMI Output capabilities (resolutions=%zu)", resolutions.size());
+    return true;
+}
+
+// DFC (zoom) is an IPlaneControl ASPECT_RATIO property, not part of IHDMIOutput capabilities,
+// so only the FULL/NONE modes that dVideoDeviceAIDLImpl supports are reported.
+bool PopulateVideoDeviceConfigFromAIDL(
+    std::vector<VideoDeviceConfigInfo>& videoDeviceConfigs)
+{
+    std::vector<int32_t> ids;
+    std::vector<HdmiOutput::Capabilities> caps;
+    if (!GetAllCapabilities(ids, caps)) {
+        return false;
+    }
+
+    VideoDeviceConfigInfo videoCfg;
+    videoCfg.numSupportedDFCs = 2;
+    videoCfg.supportedDFCsMask =
+        (1u << static_cast<uint32_t>(VideoDeviceZoom::DS_VIDEO_DEVICE_ZOOM_NONE)) |
+        (1u << static_cast<uint32_t>(VideoDeviceZoom::DS_VIDEO_DEVICE_ZOOM_FULL));
+    videoCfg.defaultDFC = VideoDeviceZoom::DS_VIDEO_DEVICE_ZOOM_FULL;
+    videoDeviceConfigs.push_back(videoCfg);
+    return true;
+}
+
+} // namespace DeviceSettingsHAL

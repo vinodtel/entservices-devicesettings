@@ -93,4 +93,20 @@ namespace DeviceSettingsHAL {
     void DumpVideoDeviceConfig(
         const std::vector<VideoDeviceConfigInfo>& videoDeviceConfigs);
 
+#ifdef ENABLE_HDMIOUTPUT_AIDL
+    // ─── HDMI Output AIDL fallback (implemented in hal/dVideoPortAIDLImpl.cpp) ──
+    // Used when the DS HAL config tables are absent. Built from IHDMIOutput.getCapabilities().
+
+    bool PopulateVideoPortConfigFromAIDL(
+        std::vector<VideoPortTypeConfig>& videoPortTypes,
+        std::vector<VideoPortPortConfig>& videoPorts);
+
+    bool PopulateVideoPortResolutionConfigFromAIDL(
+        const VideoPortType videoPortType,
+        std::vector<VideoPortResolution>& resolutions);
+
+    bool PopulateVideoDeviceConfigFromAIDL(
+        std::vector<VideoDeviceConfigInfo>& videoDeviceConfigs);
+#endif
+
 } // namespace DeviceSettingsHAL

@@ -24,6 +24,7 @@
 #undef LOG_PRI
 #endif
 
+#include <com/rdk/hal/hdmioutput/Capabilities.h>
 #include <com/rdk/hal/hdmioutput/HDCPProtocolVersion.h>
 #include <com/rdk/hal/hdmioutput/HDCPStatus.h>
 #include <com/rdk/hal/hdmioutput/IHDMIOutput.h>
@@ -31,6 +32,7 @@
 #include <com/rdk/hal/hdmioutput/IHDMIOutputControllerListener.h>
 #include <com/rdk/hal/hdmioutput/IHDMIOutputEventListener.h>
 #include <com/rdk/hal/hdmioutput/IHDMIOutputManager.h>
+#include <com/rdk/hal/hdmioutput/PlatformCapabilities.h>
 #include <com/rdk/hal/hdmioutput/State.h>
 
 #include <cstdint>
@@ -112,6 +114,10 @@ public:
 
     // Ids reported by the HDMI Output service.
     bool GetOutputIds(std::vector<int32_t>& ids);
+
+    // Capabilities are constant and independent of the output state, so these do not open the output.
+    bool GetOutputCapabilities(int32_t outputId, com::rdk::hal::hdmioutput::Capabilities& capabilities);
+    bool GetPlatformCapabilities(com::rdk::hal::hdmioutput::PlatformCapabilities& capabilities);
 
     // The first caller for an id opens the output; later callers share it. Never throws.
     Lease Acquire(int32_t outputId, Callbacks callbacks);
