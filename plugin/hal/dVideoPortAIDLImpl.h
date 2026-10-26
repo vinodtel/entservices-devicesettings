@@ -30,6 +30,8 @@
 #include <com/rdk/hal/hdmioutput/IHDMIOutputController.h>
 #include <com/rdk/hal/hdmioutput/IHDMIOutputManager.h>
 
+#include "hdmioutput_helper.h"
+
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -91,25 +93,21 @@ public:
     uint32_t SetPreferredColorDepth(const int32_t handle, const DisplayColorDepth colorDepth, const bool persist) override;
 
 private:
-    class ControllerListener;
-    class EventListener;
-
     using Manager = com::rdk::hal::hdmioutput::IHDMIOutputManager;
     using Output = com::rdk::hal::hdmioutput::IHDMIOutput;
     using Controller = com::rdk::hal::hdmioutput::IHDMIOutputController;
 
     // Handle exposed to callers is the HDMI output Id value.
+    // output and controller are copies of what the shared lease provides, so every API keeps
+    // using device->output and device->controller exactly as before.
     struct Device {
         Output::Id id;
+        HdmiOutputHelper::Lease lease;
         android::sp<Output> output;
         android::sp<Controller> controller;
-        android::sp<ControllerListener> controllerListener;
-        android::sp<EventListener> eventListener;
     };
 
-    static android::sp<Manager> GetManager();
-    bool OpenDevice(const Output::Id& id, Device& device);
-    static void CloseDevice(Device& device);
+    bool AcquireDevice(const Output::Id& id, Device& device);
     Device* FindDevice(const int32_t handle);
 
     void OnHotPlugDetectStateChanged(const int32_t handle, bool connected);
@@ -127,7 +125,6 @@ private:
 
     std::mutex _adminLock;
     CallbackBundle _callbacks;
-    android::sp<Manager> _manager;
     std::vector<Device> _devices;
     std::atomic<bool> _opened;
     // Shared by all outputs, as the persistence keys are not per output.

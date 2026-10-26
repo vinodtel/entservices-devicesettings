@@ -40,18 +40,6 @@ namespace HdmiOutput = com::rdk::hal::hdmioutput;
 using PropertyValue = com::rdk::hal::PropertyValue;
 
 namespace {
-template <typename Interface>
-android::sp<Interface> GetService()
-{
-    const android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
-    if (serviceManager == nullptr) {
-        return nullptr;
-    }
-    const android::sp<android::IBinder> binder = serviceManager->checkService(
-        android::String16(Interface::serviceName().c_str()));
-    return binder == nullptr ? nullptr : android::interface_cast<Interface>(binder);
-}
-
 // Subset of VICs mapped to the resolution names understood by the rest of the plugin.
 // Matches the resolution families produced by dVideoPortImpl::buildResolutionFromName().
 struct VicResolutionEntry {
@@ -117,61 +105,6 @@ dsHdcpStatus_t ToDsHdcpStatus(const VideoPortHdcpStatus status)
 }
 }
 
-class dVideoPortAIDLImpl::ControllerListener : public HdmiOutput::BnHDMIOutputControllerListener {
-public:
-    ControllerListener(dVideoPortAIDLImpl& parent, const int32_t handle)
-        : _parent(parent)
-        , _handle(handle)
-    {
-    }
-
-    android::binder::Status onHotPlugDetectStateChanged(bool state) override
-    {
-        _parent.OnHotPlugDetectStateChanged(_handle, state);
-        return android::binder::Status::ok();
-    }
-
-    android::binder::Status onFrameRateChanged() override
-    {
-        _parent.OnFrameRateChanged(_handle);
-        return android::binder::Status::ok();
-    }
-
-    android::binder::Status onHDCPStatusChanged(HdmiOutput::HDCPStatus hdcpStatus, HdmiOutput::HDCPProtocolVersion hdcpProtocolVersion) override
-    {
-        _parent.OnHDCPStatusChanged(_handle, hdcpStatus, hdcpProtocolVersion);
-        return android::binder::Status::ok();
-    }
-
-    android::binder::Status onEDID(const std::vector<uint8_t>&) override
-    {
-        return android::binder::Status::ok();
-    }
-
-private:
-    dVideoPortAIDLImpl& _parent;
-    const int32_t _handle;
-};
-
-class dVideoPortAIDLImpl::EventListener : public HdmiOutput::BnHDMIOutputEventListener {
-public:
-    EventListener(dVideoPortAIDLImpl& parent, const int32_t handle)
-        : _parent(parent)
-        , _handle(handle)
-    {
-    }
-
-    android::binder::Status onStateChanged(HdmiOutput::State oldState, HdmiOutput::State newState) override
-    {
-        _parent.OnStateChanged(_handle, oldState, newState);
-        return android::binder::Status::ok();
-    }
-
-private:
-    dVideoPortAIDLImpl& _parent;
-    const int32_t _handle;
-};
-
 dVideoPortAIDLImpl::dVideoPortAIDLImpl()
     : _opened(false)
 {
@@ -183,66 +116,36 @@ dVideoPortAIDLImpl::~dVideoPortAIDLImpl()
     DeInitialiseHAL();
 }
 
-android::sp<dVideoPortAIDLImpl::Manager> dVideoPortAIDLImpl::GetManager()
+// The HDMI output is opened, started and closed by HdmiOutputHelper, which is shared with the
+// other HDMI Output components. The first component to acquire an output opens it; the others
+// attach to the same session, so a second open() is never issued.
+bool dVideoPortAIDLImpl::AcquireDevice(const Output::Id& id, Device& device)
 {
-    return GetService<Manager>();
-}
+    HdmiOutputHelper::Callbacks callbacks;
+    callbacks.onHotPlug = [this](int32_t handle, bool connected) {
+        OnHotPlugDetectStateChanged(handle, connected);
+    };
+    callbacks.onFrameRateChanged = [this](int32_t handle) {
+        OnFrameRateChanged(handle);
+    };
+    callbacks.onHdcpStatus = [this](int32_t handle, HdmiOutput::HDCPStatus status, HdmiOutput::HDCPProtocolVersion version) {
+        OnHDCPStatusChanged(handle, status, version);
+    };
+    callbacks.onStateChanged = [this](int32_t handle, HdmiOutput::State oldState, HdmiOutput::State newState) {
+        OnStateChanged(handle, oldState, newState);
+    };
 
-bool dVideoPortAIDLImpl::OpenDevice(const Output::Id& id, Device& device)
-{
     device.id = id;
-    if (!_manager->getHDMIOutput(id, &device.output).isOk() || device.output == nullptr) {
-        DSLOG_ERR("getHDMIOutput failed for id=%d", id.value);
+    device.lease = HdmiOutputHelper::Instance().Acquire(id.value, std::move(callbacks));
+    // VideoPort drives the controller, so a lease without one is treated like a failed open().
+    if (!device.lease.HasController()) {
+        DSLOG_ERR("HDMI output id=%d is not available to VideoPort", id.value);
+        device.lease.Reset();
         return false;
     }
-
-    device.controllerListener = new ControllerListener(*this, id.value);
-    if (!device.output->open(device.controllerListener, &device.controller).isOk() || device.controller == nullptr) {
-        DSLOG_ERR("open() failed on HDMI output id=%d", id.value);
-        CloseDevice(device);
-        return false;
-    }
-    if (!device.controller->start().isOk()) {
-        DSLOG_ERR("HDMIOutputController::start() failed for id=%d", id.value);
-        CloseDevice(device);
-        return false;
-    }
-
-    device.eventListener = new EventListener(*this, id.value);
-    bool registered = false;
-    if (!device.output->registerEventListener(device.eventListener, &registered).isOk() || !registered) {
-        DSLOG_ERR("registerEventListener failed on HDMI output id=%d", id.value);
-    }
+    device.output = device.lease.GetOutput();
+    device.controller = device.lease.GetController();
     return true;
-}
-
-void dVideoPortAIDLImpl::CloseDevice(Device& device)
-{
-    if (device.output != nullptr) {
-        // stop() needs STARTED and close() needs READY; other states raise EX_ILLEGAL_STATE.
-        HdmiOutput::State state = HdmiOutput::State::STARTED;
-        if (!device.output->getState(&state).isOk()) {
-            state = HdmiOutput::State::STARTED;
-        }
-        if (device.controller != nullptr) {
-            if (state == HdmiOutput::State::STARTED) {
-                device.controller->stop();
-                state = HdmiOutput::State::READY;
-            }
-            if (state == HdmiOutput::State::READY) {
-                bool closed = false;
-                device.output->close(device.controller, &closed);
-            }
-        }
-        if (device.eventListener != nullptr) {
-            bool unregistered = false;
-            device.output->unregisterEventListener(device.eventListener, &unregistered);
-        }
-    }
-    device.controller.clear();
-    device.controllerListener.clear();
-    device.eventListener.clear();
-    device.output.clear();
 }
 
 dVideoPortAIDLImpl::Device* dVideoPortAIDLImpl::FindDevice(const int32_t handle)
@@ -265,31 +168,24 @@ void dVideoPortAIDLImpl::InitialiseHAL()
         return;
     }
 
-    _manager = GetManager();
-    if (_manager == nullptr) {
-        DSLOG_ERR("HDMI Output AIDL service is not available");
-        return;
-    }
-    android::ProcessState::self()->startThreadPool();
-
-    std::vector<Output::Id> ids;
-    if (!_manager->getHDMIOutputIds(&ids).isOk() || ids.empty()) {
+    std::vector<int32_t> ids;
+    if (!HdmiOutputHelper::Instance().GetOutputIds(ids) || ids.empty()) {
         DSLOG_ERR("getHDMIOutputIds failed or returned no HDMI outputs");
-        _manager.clear();
         return;
     }
 
     _devices.reserve(ids.size());
-    for (const auto& id : ids) {
+    for (const int32_t value : ids) {
+        Output::Id id;
+        id.value = value;
         Device device;
-        if (OpenDevice(id, device)) {
+        if (AcquireDevice(id, device)) {
             _devices.push_back(std::move(device));
             DSLOG_INFO("HDMI Output AIDL HAL initialized for VideoPort (outputId=%d)", id.value);
         }
     }
 
     if (_devices.empty()) {
-        _manager.clear();
         return;
     }
     DSLOG_INFO("%zu of %zu HDMI outputs opened", _devices.size(), ids.size());
@@ -309,13 +205,18 @@ void dVideoPortAIDLImpl::InitialiseHAL()
 
 void dVideoPortAIDLImpl::DeInitialiseHAL()
 {
-    std::lock_guard<std::mutex> lock(_adminLock);
-    _opened = false;
-    for (auto& device : _devices) {
-        CloseDevice(device);
+    std::vector<Device> devices;
+    {
+        std::lock_guard<std::mutex> lock(_adminLock);
+        _opened = false;
+        devices.swap(_devices);
     }
-    _devices.clear();
-    _manager.clear();
+    // The leases are released without _adminLock held: Reset() waits for callbacks that are already
+    // running, and some of them (GetVideoPortResolution) take _adminLock. The session is closed
+    // when the last component using the output releases its lease.
+    for (auto& device : devices) {
+        device.lease.Reset();
+    }
 }
 
 void dVideoPortAIDLImpl::setAllCallbacks(const CallbackBundle& bundle)
@@ -1021,8 +922,14 @@ void dVideoPortAIDLImpl::OnFrameRateChanged(const int32_t handle)
     if (GetVideoPortResolution(handle, resolution) != WPEFramework::Core::ERROR_NONE) {
         return;
     }
-    if (_callbacks.OnResolutionPostChange) {
-        _callbacks.OnResolutionPostChange(ToResolutionChange(resolution.pixelResolution));
+    // Copied under the lock because setAllCallbacks() can replace the callbacks concurrently.
+    std::function<void(const ResolutionChange)> postChange;
+    {
+        std::lock_guard<std::mutex> lock(_adminLock);
+        postChange = _callbacks.OnResolutionPostChange;
+    }
+    if (postChange) {
+        postChange(ToResolutionChange(resolution.pixelResolution));
     }
 }
 
@@ -1034,8 +941,13 @@ void dVideoPortAIDLImpl::OnHDCPStatusChanged(const int32_t handle, HdmiOutput::H
     const bool authenticated = (converted == VideoPortHdcpStatus::DS_HDCP_STATUS_AUTHENTICATED);
     _dsSyncHdmiStatus(DS_HDMI_TAG_HDCPVERSION,
         (authenticated && version == HdmiOutput::HDCPProtocolVersion::VERSION_2_X) ? dsHDCP_VERSION_2X : dsHDCP_VERSION_1X);
-    if (_callbacks.OnHDCPStatusChange) {
-        _callbacks.OnHDCPStatusChange(converted);
+    std::function<void(const VideoPortHdcpStatus)> hdcpCallback;
+    {
+        std::lock_guard<std::mutex> lock(_adminLock);
+        hdcpCallback = _callbacks.OnHDCPStatusChange;
+    }
+    if (hdcpCallback) {
+        hdcpCallback(converted);
     }
 }
 

@@ -207,7 +207,7 @@ if(HDMIOUTPUT_AIDL_INCLUDE_DIR
         AND ANDROID_BINDER_LIBRARY
         AND ANDROID_UTILS_LIBRARY)
     message(STATUS "Enabling HDMI Output AIDL HAL support")
-    target_sources(${PLUGIN_IMPLEMENTATION} PRIVATE hal/dVideoPortAIDLImpl.cpp hal/dVideoDeviceAIDLImpl.cpp)
+    target_sources(${PLUGIN_IMPLEMENTATION} PRIVATE hal/hdmioutput_helper.cpp hal/dVideoPortAIDLImpl.cpp hal/dVideoDeviceAIDLImpl.cpp)
     target_compile_definitions(${PLUGIN_IMPLEMENTATION} PRIVATE ENABLE_HDMIOUTPUT_AIDL)
     target_include_directories(${PLUGIN_IMPLEMENTATION} PRIVATE
         ${HDMIOUTPUT_AIDL_INCLUDE_DIR}

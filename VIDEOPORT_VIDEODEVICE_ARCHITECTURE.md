@@ -102,8 +102,9 @@ flowchart TB
 | `VideoDevice` | Provides a backend-independent API, installs the `CallbackBundle`, and selects the AIDL or legacy backend for zoom/HDR/frame-rate control. |
 | `hal::dVideoPort::IPlatform` | Defines the common lifecycle, resolution, HDCP, HDR, and color/quantization query-and-control contract. |
 | `hal::dVideoDevice::IPlatform` | Defines the common lifecycle, zoom/DFC, HDR-capability, codec-info, and frame-rate contract. |
-| `dVideoPortAIDLImpl` | Maps the common VideoPort contract to `IHDMIOutputManager`/`IHDMIOutput`/`IHDMIOutputController` (VIC↔resolution, HDR mode, HDCP status/version). |
-| `dVideoDeviceAIDLImpl` | Maps the HDR-capability and VIC-encoded-frame-rate subset of the VideoDevice contract to the same AIDL services; zoom/FRF/codec-info are unsupported (require `IPlaneControl`/`IPanelOutput`/`IVideoDecoderManager`, not wired here). |
+| `dVideoPortAIDLImpl` | Maps the common VideoPort contract to `IHDMIOutput`/`IHDMIOutputController` (VIC↔resolution, HDR mode, HDCP status/version). The output is acquired through `HdmiOutputHelper`, which opens it once and shares it with other components. |
+| `dVideoDeviceAIDLImpl` | Maps the HDR-capability and VIC-encoded-frame-rate subset of the VideoDevice contract to the same AIDL services; zoom/FRF/codec-info are unsupported (require `IPlaneControl`/`IPanelOutput`/`IVideoDecoderManager`, not wired here). Acquires the output through `HdmiOutputHelper`. |
+| `HdmiOutputHelper` (`hal/hdmioutput_helper.cpp`) | Process-wide singleton owning the HDMI Output sessions. The first `Acquire(id)` does `open()` + `start()` + listener registration; later acquirers attach to the same session (no second `open()`). It registers one controller listener and one event listener per output and fans events out to every component, caching hot-plug/HDCP for late attachers. The session is stopped and closed when the last lease is released. |
 | `dVideoPortImpl` | Maps the common VideoPort contract to legacy `dsVideoPort*` functions loaded from the DS HAL library. |
 | `dVideoDeviceImpl` | Maps the common VideoDevice contract to legacy `dsVideoDevice*` functions loaded from the DS HAL library. |
 
@@ -332,8 +333,8 @@ sequenceDiagram
     alt AIDL manager is available
         SM-->>FactoryVP: manager binder
         FactoryVP->>AIDLVP: construct
-        AIDLVP->>SM: getHDMIOutputIds / getHDMIOutput
-        AIDLVP->>AIDLVP: open(controllerListener) + start() + registerEventListener
+        AIDLVP->>SM: HdmiOutputHelper.GetOutputIds / Acquire(id)
+        AIDLVP->>AIDLVP: first component to acquire: helper does open(controllerListener) + start() + registerEventListener; later components attach to the open session
         FactoryVP-->>CVP: VideoPort(AIDL platform)
     else AIDL manager is unavailable
         SM-->>FactoryVP: null
@@ -349,8 +350,8 @@ sequenceDiagram
     alt AIDL manager is available
         SM-->>FactoryVD: manager binder
         FactoryVD->>AIDLVD: construct
-        AIDLVD->>SM: getHDMIOutputIds / getHDMIOutput
-        AIDLVD->>AIDLVD: acquire HDMI output read-only (no open/start/registerEventListener; VideoPort owns them)
+        AIDLVD->>SM: HdmiOutputHelper.GetOutputIds / Acquire(id)
+        AIDLVD->>AIDLVD: attaches to the session opened by whichever component acquired first (or opens it if first); never issues a second open()
         FactoryVD-->>CVD: VideoDevice(AIDL platform)
     else AIDL manager is unavailable
         SM-->>FactoryVD: null

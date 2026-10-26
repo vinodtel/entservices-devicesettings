@@ -34,18 +34,6 @@ namespace HdmiOutput = com::rdk::hal::hdmioutput;
 using PropertyValue = com::rdk::hal::PropertyValue;
 
 namespace {
-template <typename Interface>
-android::sp<Interface> GetService()
-{
-    const android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
-    if (serviceManager == nullptr) {
-        return nullptr;
-    }
-    const android::sp<android::IBinder> binder = serviceManager->checkService(
-        android::String16(Interface::serviceName().c_str()));
-    return binder == nullptr ? nullptr : android::interface_cast<Interface>(binder);
-}
-
 // Frame-rate-only view of the VIC table: which VIC to use to keep the same resolution
 // family (1080p/2160p) while switching to a different frame rate (FRF-mode style switch).
 struct FrameRateVicEntry {
@@ -97,25 +85,29 @@ dVideoDeviceAIDLImpl::~dVideoDeviceAIDLImpl()
     DeInitialiseHAL();
 }
 
-android::sp<dVideoDeviceAIDLImpl::Manager> dVideoDeviceAIDLImpl::GetManager()
-{
-    return GetService<Manager>();
-}
-
-// Read-only acquisition. VideoPort is the sole owner of open()/start() and of the single event
-// listener for an HDMI output (IHDMIOutput.open() requires State::CLOSED; one listener allowed).
+// The HDMI output is opened, started and closed by HdmiOutputHelper, which is shared with the
+// other HDMI Output components. If VideoDevice is the first to acquire the output it opens it;
+// otherwise it attaches to the session that is already open, so a second open() is never issued.
 bool dVideoDeviceAIDLImpl::AcquireOutput(const Output::Id& id, Device& device)
 {
+    HdmiOutputHelper::Callbacks callbacks;
+    callbacks.onFrameRateChanged = [this](int32_t handle) {
+        OnFrameRateChanged(handle);
+    };
+
     device.id = id;
-    if (!_manager->getHDMIOutput(id, &device.output).isOk() || device.output == nullptr) {
-        DSLOG_ERR("getHDMIOutput failed for id=%d", id.value);
-        device.output.clear();
+    device.lease = HdmiOutputHelper::Instance().Acquire(id.value, std::move(callbacks));
+    // VideoDevice only needs the output interface, so a lease without a controller is acceptable.
+    if (!device.lease.Valid()) {
+        DSLOG_ERR("HDMI output id=%d is not available to VideoDevice", id.value);
         return false;
     }
+    device.output = device.lease.GetOutput();
 
     HdmiOutput::State state = HdmiOutput::State::UNKNOWN;
     if (device.output->getState(&state).isOk()) {
-        DSLOG_INFO("VideoDevice acquired HDMI output id=%d read-only, state=%d", id.value, static_cast<int>(state));
+        DSLOG_INFO("VideoDevice acquired HDMI output id=%d, state=%d, status=%d",
+            id.value, static_cast<int>(state), static_cast<int>(device.lease.GetStatus()));
     }
     return true;
 }
@@ -140,22 +132,16 @@ void dVideoDeviceAIDLImpl::InitialiseHAL()
         return;
     }
 
-    _manager = GetManager();
-    if (_manager == nullptr) {
-        DSLOG_ERR("HDMI Output AIDL service is not available");
-        return;
-    }
-    android::ProcessState::self()->startThreadPool();
-
-    std::vector<Output::Id> ids;
-    if (!_manager->getHDMIOutputIds(&ids).isOk() || ids.empty()) {
+    std::vector<int32_t> ids;
+    if (!HdmiOutputHelper::Instance().GetOutputIds(ids) || ids.empty()) {
         DSLOG_ERR("getHDMIOutputIds failed or returned no HDMI outputs");
-        _manager.clear();
         return;
     }
 
     _devices.reserve(ids.size());
-    for (const auto& id : ids) {
+    for (const int32_t value : ids) {
+        Output::Id id;
+        id.value = value;
         Device device;
         if (AcquireOutput(id, device)) {
             _devices.push_back(std::move(device));
@@ -164,21 +150,28 @@ void dVideoDeviceAIDLImpl::InitialiseHAL()
 
     if (_devices.empty()) {
         DSLOG_ERR("VideoDevice AIDL initialisation FAILED: no HDMI output could be acquired");
-        _manager.clear();
         return;
     }
     getPersistenceValue();
     _opened = true;
-    DSLOG_INFO("VideoDevice AIDL initialised: %zu of %zu HDMI output(s) acquired read-only",
+    DSLOG_INFO("VideoDevice AIDL initialised: %zu of %zu HDMI output(s) acquired",
         _devices.size(), ids.size());
 }
 
 void dVideoDeviceAIDLImpl::DeInitialiseHAL()
 {
-    std::lock_guard<std::mutex> lock(_adminLock);
-    _opened = false;
-    _devices.clear();
-    _manager.clear();
+    std::vector<Device> devices;
+    {
+        std::lock_guard<std::mutex> lock(_adminLock);
+        _opened = false;
+        devices.swap(_devices);
+    }
+    // The leases are released without _adminLock held: Reset() waits for callbacks that are already
+    // running, and OnFrameRateChanged takes _adminLock. The output is closed only when the last
+    // component using it releases its lease.
+    for (auto& device : devices) {
+        device.lease.Reset();
+    }
 }
 
 void dVideoDeviceAIDLImpl::setAllCallbacks(const CallbackBundle& bundle)
@@ -341,15 +334,23 @@ uint32_t dVideoDeviceAIDLImpl::SetDisplayFrameRate(const int32_t handle, const s
 {
     (void)handle;
     (void)framerate;
-    DSLOG_WARN("Display frame rate is an IPanelOutput property (setRefreshRate); VideoDevice does not own the HDMI controller");
+    DSLOG_WARN("Display frame rate is an IPanelOutput property (setRefreshRate) in the API mapping and is not supported here");
     return WPEFramework::Core::ERROR_UNAVAILABLE;
 }
 
 void dVideoDeviceAIDLImpl::OnFrameRateChanged(const int32_t handle)
 {
     string framerate;
-    if (GetCurrentDisplayFrameRate(handle, framerate) == WPEFramework::Core::ERROR_NONE
-        && _callbacks.OnDisplayFrameratePostChange) {
-        _callbacks.OnDisplayFrameratePostChange(framerate);
+    if (GetCurrentDisplayFrameRate(handle, framerate) != WPEFramework::Core::ERROR_NONE) {
+        return;
+    }
+    // Copied under the lock because setAllCallbacks() can replace the callbacks concurrently.
+    std::function<void(const string)> postChange;
+    {
+        std::lock_guard<std::mutex> lock(_adminLock);
+        postChange = _callbacks.OnDisplayFrameratePostChange;
+    }
+    if (postChange) {
+        postChange(framerate);
     }
 }

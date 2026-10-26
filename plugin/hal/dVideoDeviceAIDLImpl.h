@@ -28,18 +28,21 @@
 #include <com/rdk/hal/hdmioutput/IHDMIOutputController.h>
 #include <com/rdk/hal/hdmioutput/IHDMIOutputManager.h>
 
+#include "hdmioutput_helper.h"
+
 #include <atomic>
 #include <mutex>
 #include <vector>
 
 // Implements the VideoDevice HAL Platform interface (see dVideoDevice.h) on top of the
 // com.rdk.hal.hdmioutput AIDL HAL. Per the VideoPort/VideoDevice API mapping most dsVideoDevice.c
-// APIs are backed by IPanelOutput/IVideoDecoderManager (not wired here), so only the read-only
-// HDMI Output surface (HDR capabilities, current VIC frame rate) is functional; the rest report
+// APIs are backed by IPanelOutput/IVideoDecoderManager (not wired here), so only the HDMI Output
+// surface (HDR capabilities, current VIC frame rate) is functional; the rest report
 // ERROR_UNAVAILABLE.
 //
-// VideoDevice never opens an HDMI output: IHDMIOutput.open() needs State::CLOSED and only one
-// event listener is allowed per output, so dVideoPortAIDLImpl is the sole owner of open()/start().
+// The HDMI output is shared with dVideoPortAIDLImpl through HdmiOutputHelper: IHDMIOutput.open()
+// needs State::CLOSED and only one event listener is allowed per output, so whichever component
+// acquires the output first opens it and the other attaches to the same session.
 class dVideoDeviceAIDLImpl : public hal::dVideoDevice::IPlatform {
 public:
     dVideoDeviceAIDLImpl();
@@ -66,18 +69,17 @@ public:
     uint32_t SetDisplayFrameRate(const int32_t handle, const string framerate) override;
 
 private:
-    using Manager = com::rdk::hal::hdmioutput::IHDMIOutputManager;
     using Output = com::rdk::hal::hdmioutput::IHDMIOutput;
 
     // Handle exposed to callers is the HDMI output Id value.
     struct Device {
         Output::Id id;
-        android::sp<Output> output; // read-only use: getCapabilities/getProperty/getState
+        HdmiOutputHelper::Lease lease;
+        android::sp<Output> output; // copy of lease output: getCapabilities/getProperty/getState
         VideoDeviceZoom cachedZoom = VideoDeviceZoom::DS_VIDEO_DEVICE_ZOOM_FULL;
         bool forceDisableHDR = true;
     };
 
-    static android::sp<Manager> GetManager();
     bool AcquireOutput(const Output::Id& id, Device& device);
     Device* FindDevice(const int32_t handle);
 
@@ -85,7 +87,6 @@ private:
 
     std::mutex _adminLock;
     CallbackBundle _callbacks;
-    android::sp<Manager> _manager;
     std::vector<Device> _devices;
-    bool _opened;
+    std::atomic<bool> _opened;
 };
