@@ -35,6 +35,8 @@
 #include <com/rdk/hal/hdmioutput/PlatformCapabilities.h>
 #include <com/rdk/hal/hdmioutput/State.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -68,6 +70,12 @@ public:
         SHARED_EXISTING,     // attached to the session this process already owns
         OUTPUT_ONLY,         // output is held by someone else: output is usable, controller is null
         UNAVAILABLE          // service or output not reachable: the lease is empty
+    };
+
+    enum class EdidStatus {
+        AVAILABLE,    // the sink EDID was received
+        DISCONNECTED, // no sink is connected, so there is no EDID
+        TIMEOUT       // a sink is connected but its EDID has not been delivered (yet)
     };
 
     // All members are optional and are invoked on a Binder thread.
@@ -122,6 +130,13 @@ public:
     // The first caller for an id opens the output; later callers share it. Never throws.
     Lease Acquire(int32_t outputId, Callbacks callbacks);
 
+    // Latest sink EDID delivered by IHDMIOutputControllerListener.onEDID(). The service sends it
+    // asynchronously after the hot-plug event, so a connected sink gets up to `timeout` to deliver it.
+    // The cache is cleared on every hot-plug event and when the session closes.
+    // Must not be called from a helper callback or while holding a lock that a callback can take.
+    EdidStatus GetEdid(int32_t outputId, std::vector<uint8_t>& edid,
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(1000));
+
     HdmiOutputHelper(const HdmiOutputHelper&) = delete;
     HdmiOutputHelper& operator=(const HdmiOutputHelper&) = delete;
 
@@ -149,6 +164,7 @@ private:
         int refs = 0;
         std::optional<bool> hotPlug; // cached: the service reports it only while opening
         std::optional<std::pair<HdcpStatus, HdcpVersion>> hdcp;
+        std::optional<std::vector<uint8_t>> edid; // cleared whenever the hot-plug state changes
         std::map<uint32_t, std::shared_ptr<Subscriber>> subs;
     };
 
@@ -164,6 +180,7 @@ private:
     void OnFrameRate(int32_t id);
     void OnHdcp(int32_t id, HdcpStatus status, HdcpVersion version);
     void OnState(int32_t id, State oldState, State newState);
+    void OnEdid(int32_t id, const std::vector<uint8_t>& edid);
 
     template <typename Fn>
     static void Invoke(HdmiOutputHelper& helper, Subscriber& subscriber, Fn&& fn);
@@ -176,4 +193,5 @@ private:
     android::sp<Manager> _manager;       // guarded by _openLock
     std::map<int32_t, Entry> _entries;   // structure guarded by _openLock and _stateLock
     uint32_t _nextToken = 0;             // guarded by _stateLock
+    std::condition_variable _edidCv;     // used with _stateLock; signalled on EDID, hot-plug and close
 };

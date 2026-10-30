@@ -37,7 +37,8 @@
 #include <vector>
 
 // Implements the VideoPort HAL Platform interface (see dVideoPort.h) on top of the
-// com.rdk.hal.hdmioutput AIDL HAL. API mapping follows hdmiout_mapping.csv.
+// com.rdk.hal.hdmioutput AIDL HAL. API mapping follows the latest
+// "VideoPort and VideoDevice HAL Mapping" document.
 class dVideoPortAIDLImpl : public hal::dVideoPort::IPlatform {
 public:
     dVideoPortAIDLImpl();

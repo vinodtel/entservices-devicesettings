@@ -81,8 +81,9 @@ public:
         return android::binder::Status::ok();
     }
 
-    android::binder::Status onEDID(const std::vector<uint8_t>&) override
+    android::binder::Status onEDID(const std::vector<uint8_t>& edid) override
     {
+        _helper.OnEdid(_id, edid);
         return android::binder::Status::ok();
     }
 
@@ -363,6 +364,8 @@ void HdmiOutputHelper::CloseSession(Entry& e) // _openLock held
     e.controller.clear();
     e.hotPlug.reset();
     e.hdcp.reset();
+    e.edid.reset();
+    _edidCv.notify_all();
     DSLOG_INFO("HDMI output id=%d closed", e.id);
 }
 
@@ -523,7 +526,10 @@ void HdmiOutputHelper::OnHotPlug(const int32_t id, const bool connected)
             return;
         }
         it->second.hotPlug = connected;
+        // A new HPD event means a different sink may be attached; its EDID follows via onEDID().
+        it->second.edid.reset();
     }
+    _edidCv.notify_all();
     for (auto& subscriber : SnapshotSubscribers(id)) {
         Invoke(*this, *subscriber, [&] {
             if (subscriber->cb.onHotPlug) {
@@ -561,6 +567,46 @@ void HdmiOutputHelper::OnHdcp(const int32_t id, const HdcpStatus status, const H
             }
         });
     }
+}
+
+void HdmiOutputHelper::OnEdid(const int32_t id, const std::vector<uint8_t>& edid)
+{
+    {
+        std::lock_guard<std::mutex> state(_stateLock);
+        auto it = _entries.find(id);
+        if (it == _entries.end()) {
+            return;
+        }
+        it->second.edid = edid;
+    }
+    DSLOG_INFO("EDID received for HDMI output id=%d (%zu bytes)", id, edid.size());
+    _edidCv.notify_all();
+}
+
+HdmiOutputHelper::EdidStatus HdmiOutputHelper::GetEdid(const int32_t outputId, std::vector<uint8_t>& edid,
+    const std::chrono::milliseconds timeout)
+{
+    std::unique_lock<std::mutex> state(_stateLock);
+    // Ready once the EDID arrived or the sink is known to be absent.
+    const auto settled = [&] {
+        auto it = _entries.find(outputId);
+        return it == _entries.end() || it->second.edid.has_value()
+            || (it->second.hotPlug.has_value() && !*it->second.hotPlug);
+    };
+    _edidCv.wait_for(state, timeout, settled);
+
+    auto it = _entries.find(outputId);
+    if (it == _entries.end()) {
+        return EdidStatus::TIMEOUT;
+    }
+    if (it->second.edid.has_value()) {
+        edid = *it->second.edid;
+        return EdidStatus::AVAILABLE;
+    }
+    if (it->second.hotPlug.has_value() && !*it->second.hotPlug) {
+        return EdidStatus::DISCONNECTED;
+    }
+    return EdidStatus::TIMEOUT;
 }
 
 void HdmiOutputHelper::OnState(const int32_t id, const State oldState, const State newState)

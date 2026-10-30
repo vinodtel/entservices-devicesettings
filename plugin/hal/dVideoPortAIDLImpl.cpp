@@ -35,10 +35,13 @@
 #include <com/rdk/hal/hdmioutput/State.h>
 #include <com/rdk/hal/hdmioutput/VIC.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <set>
 #include <string>
+#include <vector>
 
 namespace HdmiOutput = com::rdk::hal::hdmioutput;
 using PropertyValue = com::rdk::hal::PropertyValue;
@@ -80,6 +83,287 @@ int32_t ExtractIntProperty(const std::optional<PropertyValue>& value, int32_t de
         return defaultValue;
     }
     return value->value->get<PropertyValue::Value::intValue>();
+}
+
+const VicResolutionEntry* FindVicEntryByName(const std::string& name)
+{
+    for (const auto& entry : kVicTable) {
+        if (name == entry.name) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+// Default video mode of a port. PlatformCapabilities.nativeFrameRate gives the territory rate
+// (50 Hz or 60 Hz family); the mode itself is the profile default (TV 2160p, STB 1080p) at that
+// rate, limited to what the port supports. The default is only reported here: the middleware
+// applies it through Property.VIC. Returns an empty string when the port supports none of the
+// candidates. `caps` may be null when the port capabilities are unknown.
+std::string ResolveDefaultResolution(const HdmiOutput::Capabilities* caps)
+{
+    bool is50HzTerritory = false;
+    HdmiOutput::PlatformCapabilities platformCaps;
+    if (HdmiOutputHelper::Instance().GetPlatformCapabilities(platformCaps)) {
+        const double rate = platformCaps.nativeFrameRate;
+        is50HzTerritory = (std::fabs(rate - 25.0) < 0.5) || (std::fabs(rate - 50.0) < 0.5);
+    } else {
+        DSLOG_WARN("PlatformCapabilities unavailable, assuming a 60 Hz territory for the default resolution");
+    }
+
+    std::vector<std::string> candidates;
+    const auto addFamily = [&](const char* name50, const char* name60) {
+        candidates.push_back(is50HzTerritory ? name50 : name60);
+        candidates.push_back(is50HzTerritory ? name60 : name50);
+    };
+    if (profileType == TV) {
+        addFamily("2160p50", "2160p");
+    }
+    addFamily("1080p50", "1080p");
+    addFamily("720p50", "720p");
+    addFamily("576p50", "480p");
+
+    for (const auto& name : candidates) {
+        const VicResolutionEntry* entry = FindVicEntryByName(name);
+        if (entry == nullptr) {
+            continue;
+        }
+        if (caps == nullptr || std::find(caps->supportedVICs.begin(), caps->supportedVICs.end(), entry->vic) != caps->supportedVICs.end()) {
+            return name;
+        }
+    }
+    return std::string();
+}
+
+// ---------------------------------------------------------------------------
+// Sink EDID (delivered by IHDMIOutputControllerListener.onEDID()). Only the CTA-861 data blocks
+// needed by the VideoPort APIs are decoded: supported VICs, HDR formats and Dolby Digital /
+// Dolby Digital Plus audio.
+// ---------------------------------------------------------------------------
+struct SinkEdidInfo {
+    std::set<uint8_t> vics;     // CTA-861 VICs, without the "native" flag
+    int32_t hdrMask = 0;        // DS_HDRSTANDARD_* bits
+    uint8_t maxAc3Channels = 0;
+    uint8_t maxEac3Channels = 0;
+};
+
+constexpr uint32_t TvRes(const TVResolution resolution)
+{
+    return static_cast<uint32_t>(resolution);
+}
+
+// CTA-861 VIC -> DS_TV_RESOLUTION_* bits. Some legacy resolutions are the same timing under two
+// names (for example 1080p and 1080p60), so a VIC can map to more than one bit.
+struct EdidVicTvResolution {
+    uint8_t vic;
+    uint32_t mask;
+};
+
+const EdidVicTvResolution kEdidVicTable[] = {
+    { 2,  TvRes(TVResolution::DS_TV_RESOLUTION_480P) },
+    { 3,  TvRes(TVResolution::DS_TV_RESOLUTION_480P) },
+    { 6,  TvRes(TVResolution::DS_TV_RESOLUTION_480I) },
+    { 7,  TvRes(TVResolution::DS_TV_RESOLUTION_480I) },
+    { 17, TvRes(TVResolution::DS_TV_RESOLUTION_576P) | TvRes(TVResolution::DS_TV_RESOLUTION_576P50) },
+    { 18, TvRes(TVResolution::DS_TV_RESOLUTION_576P) | TvRes(TVResolution::DS_TV_RESOLUTION_576P50) },
+    { 21, TvRes(TVResolution::DS_TV_RESOLUTION_576I) },
+    { 22, TvRes(TVResolution::DS_TV_RESOLUTION_576I) },
+    { 4,  TvRes(TVResolution::DS_TV_RESOLUTION_720P) },
+    { 69, TvRes(TVResolution::DS_TV_RESOLUTION_720P) },
+    { 19, TvRes(TVResolution::DS_TV_RESOLUTION_720P50) },
+    { 68, TvRes(TVResolution::DS_TV_RESOLUTION_720P50) },
+    { 5,  TvRes(TVResolution::DS_TV_RESOLUTION_1080I) },
+    { 20, TvRes(TVResolution::DS_TV_RESOLUTION_1080I50) | TvRes(TVResolution::DS_TV_RESOLUTION_1080I25) },
+    { 16, TvRes(TVResolution::DS_TV_RESOLUTION_1080P) | TvRes(TVResolution::DS_TV_RESOLUTION_1080P60) },
+    { 32, TvRes(TVResolution::DS_TV_RESOLUTION_1080P24) },
+    { 72, TvRes(TVResolution::DS_TV_RESOLUTION_1080P24) },
+    { 34, TvRes(TVResolution::DS_TV_RESOLUTION_1080P30) },
+    { 74, TvRes(TVResolution::DS_TV_RESOLUTION_1080P30) },
+    { 31, TvRes(TVResolution::DS_TV_RESOLUTION_1080P50) },
+    { 75, TvRes(TVResolution::DS_TV_RESOLUTION_1080P50) },
+    { 93, TvRes(TVResolution::DS_TV_RESOLUTION_2160P24) },
+    { 94, TvRes(TVResolution::DS_TV_RESOLUTION_2160P25) },
+    { 95, TvRes(TVResolution::DS_TV_RESOLUTION_2160P30) },
+    { 96, TvRes(TVResolution::DS_TV_RESOLUTION_2160P50) },
+    { 97, TvRes(TVResolution::DS_TV_RESOLUTION_2160P60) },
+};
+
+// VICs 1-64 are sent with bit 7 set when the mode is the sink's native one.
+uint8_t NormalizeSvd(const uint8_t svd)
+{
+    return (svd >= 129 && svd <= 192) ? static_cast<uint8_t>(svd & 0x7F) : svd;
+}
+
+void ParseHdmiVsdb(const uint8_t* data, const size_t len, SinkEdidInfo& info)
+{
+    // HDMI 1.4 LLC OUI 00-0C-03, stored little endian.
+    if (len < 8 || data[0] != 0x03 || data[1] != 0x0C || data[2] != 0x00) {
+        return;
+    }
+    const uint8_t flags = data[7];
+    size_t pos = 8;
+    if (flags & 0x80) {          // latency fields present
+        pos += (flags & 0x40) ? 4 : 2;
+    }
+    if ((flags & 0x20) == 0 || pos + 1 >= len) {  // no HDMI_Video fields
+        return;
+    }
+    const size_t hdmiVicCount = data[pos + 1] >> 5;
+    pos += 2;
+    // HDMI_VIC 1-3 are 3840x2160 at 30, 25 and 24 Hz, i.e. CTA VICs 95, 94 and 93.
+    static const uint8_t kHdmiVicToCta[] = { 0, 95, 94, 93 };
+    for (size_t i = 0; i < hdmiVicCount && pos + i < len; ++i) {
+        const uint8_t hdmiVic = data[pos + i];
+        if (hdmiVic >= 1 && hdmiVic <= 3) {
+            info.vics.insert(kHdmiVicToCta[hdmiVic]);
+        }
+    }
+}
+
+void ParseExtendedDataBlock(const uint8_t* data, const size_t len, SinkEdidInfo& info)
+{
+    if (len < 1) {
+        return;
+    }
+    switch (data[0]) {
+    case 1:   // Vendor-specific video data block: OUI identifies Dolby Vision / HDR10+
+        if (len >= 4) {
+            if (data[1] == 0x46 && data[2] == 0xD0 && data[3] == 0x00) {
+                info.hdrMask |= static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_DOLBYVISION);
+            } else if (data[1] == 0x8B && data[2] == 0x84 && data[3] == 0x90) {
+                info.hdrMask |= static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10PLUS);
+            }
+        }
+        break;
+    case 6:   // HDR static metadata: bit 2 = SMPTE ST 2084 (HDR10), bit 3 = HLG
+        if (len >= 2) {
+            if (data[1] & 0x04) {
+                info.hdrMask |= static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10);
+            }
+            if (data[1] & 0x08) {
+                info.hdrMask |= static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HLG);
+            }
+        }
+        break;
+    case 14:  // YCbCr 4:2:0 only video data block
+        for (size_t i = 1; i < len; ++i) {
+            if (NormalizeSvd(data[i]) != 0) {
+                info.vics.insert(NormalizeSvd(data[i]));
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+void ParseDataBlock(const uint8_t tag, const uint8_t* data, const size_t len, SinkEdidInfo& info)
+{
+    switch (tag) {
+    case 1:   // Audio data block: 3-byte short audio descriptors
+        for (size_t i = 0; i + 2 < len; i += 3) {
+            const uint8_t format = (data[i] >> 3) & 0x0F;
+            const uint8_t channels = static_cast<uint8_t>((data[i] & 0x07) + 1);
+            if (format == 2) {          // AC-3
+                info.maxAc3Channels = std::max(info.maxAc3Channels, channels);
+            } else if (format == 10) {  // E-AC-3
+                info.maxEac3Channels = std::max(info.maxEac3Channels, channels);
+            }
+        }
+        break;
+    case 2:   // Video data block: short video descriptors
+        for (size_t i = 0; i < len; ++i) {
+            if (NormalizeSvd(data[i]) != 0) {
+                info.vics.insert(NormalizeSvd(data[i]));
+            }
+        }
+        break;
+    case 3:
+        ParseHdmiVsdb(data, len, info);
+        break;
+    case 7:
+        ParseExtendedDataBlock(data, len, info);
+        break;
+    default:
+        break;
+    }
+}
+
+// Every offset is bounds checked: the EDID comes from the sink and may be truncated or corrupt.
+// Returns false only when the data is not an EDID at all.
+bool ParseSinkEdid(const std::vector<uint8_t>& edid, SinkEdidInfo& info)
+{
+    static const uint8_t kHeader[8] = { 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+    if (edid.size() < 128 || std::memcmp(edid.data(), kHeader, sizeof(kHeader)) != 0) {
+        return false;
+    }
+    const size_t blocks = edid.size() / 128;
+    for (size_t b = 1; b < blocks; ++b) {
+        const uint8_t* block = &edid[b * 128];
+        if (block[0] != 0x02) {   // CTA-861 extension
+            continue;
+        }
+        const size_t end = block[2];   // offset of the first detailed timing descriptor
+        if (end <= 4 || end > 127) {
+            continue;
+        }
+        size_t pos = 4;
+        while (pos < end) {
+            const uint8_t tag = block[pos] >> 5;
+            const size_t len = block[pos] & 0x1F;
+            if (pos + 1 + len > end) {
+                break;
+            }
+            ParseDataBlock(tag, block + pos + 1, len, info);
+            pos += 1 + len;
+        }
+    }
+    return true;
+}
+
+// Fetches and decodes the EDID of the connected sink. `connected` is false when no sink is attached.
+uint32_t ReadSinkEdid(const int32_t outputId, SinkEdidInfo& info, bool& connected)
+{
+    std::vector<uint8_t> edid;
+    connected = true;
+    switch (HdmiOutputHelper::Instance().GetEdid(outputId, edid)) {
+    case HdmiOutputHelper::EdidStatus::AVAILABLE:
+        break;
+    case HdmiOutputHelper::EdidStatus::DISCONNECTED:
+        connected = false;
+        return WPEFramework::Core::ERROR_NONE;
+    default:
+        DSLOG_WARN("EDID not available for HDMI output id=%d", outputId);
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+    if (!ParseSinkEdid(edid, info)) {
+        DSLOG_ERR("EDID of HDMI output id=%d is invalid (%zu bytes)", outputId, edid.size());
+        return WPEFramework::Core::ERROR_GENERAL;
+    }
+    return WPEFramework::Core::ERROR_NONE;
+}
+
+int32_t SurroundModeFromEdid(const SinkEdidInfo& info)
+{
+    // Surround means at least 5.1 channels of Dolby Digital / Dolby Digital Plus.
+    if (info.maxEac3Channels >= 6) {
+        return static_cast<int32_t>(VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_DDPLUS);
+    }
+    if (info.maxAc3Channels >= 6) {
+        return static_cast<int32_t>(VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_DD);
+    }
+    return static_cast<int32_t>(VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_NONE);
+}
+
+uint32_t TvResolutionsFromEdid(const SinkEdidInfo& info)
+{
+    uint32_t mask = 0;
+    for (const auto& entry : kEdidVicTable) {
+        if (info.vics.count(entry.vic) != 0) {
+            mask |= entry.mask;
+        }
+    }
+    return mask;
 }
 
 ResolutionChange ToResolutionChange(const VideoResolution pixelResolution)
@@ -231,8 +515,14 @@ void dVideoPortAIDLImpl::setAllCallbacks(const CallbackBundle& bundle)
 
 void dVideoPortAIDLImpl::getPersistenceValue()
 {
-    // Same defaults as legacy: TV profile 2160p, otherwise 1080p.
-    _persistedResolution = (profileType == TV) ? "2160p" : "1080p";
+    // Default: profile resolution (TV 2160p, otherwise 1080p) at the territory frame rate, limited
+    // to what the first output supports. Falls back to the plain profile default.
+    HdmiOutput::Capabilities caps;
+    const bool haveCaps = !_devices.empty() && HdmiOutputHelper::Instance().GetOutputCapabilities(_devices.front().id.value, caps);
+    _persistedResolution = ResolveDefaultResolution(haveCaps ? &caps : nullptr);
+    if (_persistedResolution.empty()) {
+        _persistedResolution = (profileType == TV) ? "2160p" : "1080p";
+    }
     _force4KDisabled = false;
     try {
         auto& persistence = device::HostPersistence::getInstance();
@@ -322,7 +612,25 @@ uint32_t dVideoPortAIDLImpl::IsVideoPortDisplayConnected(const int32_t handle, b
 
 uint32_t dVideoPortAIDLImpl::IsVideoPortActive(const int32_t handle, bool& active)
 {
-    return IsVideoPortDisplayConnected(handle, active);
+    Device* device = FindDevice(handle);
+    if (device == nullptr) {
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+    // Mapping: dsIsVideoPortActive -> IHDMIOutput.getState() + IHDMIOutputController.getHotPlugDetectState().
+    // onHotPlugDetectStateChanged() always fires while the output is opening, so an open output
+    // with the HPD line asserted is treated as an active port.
+    HdmiOutput::State state = HdmiOutput::State::UNKNOWN;
+    if (!device->output->getState(&state).isOk()) {
+        return WPEFramework::Core::ERROR_GENERAL;
+    }
+    bool connected = false;
+    if (!device->controller->getHotPlugDetectState(&connected).isOk()) {
+        return WPEFramework::Core::ERROR_GENERAL;
+    }
+    active = connected && (state == HdmiOutput::State::READY || state == HdmiOutput::State::STARTED);
+    DSLOG_INFO("handle=%d state=%d connected=%s active=%s", handle, static_cast<int>(state),
+        connected ? "true" : "false", active ? "true" : "false");
+    return WPEFramework::Core::ERROR_NONE;
 }
 
 bool dVideoPortAIDLImpl::VicToResolution(HdmiOutput::VIC vic, VideoPortResolution& resolution)
@@ -644,46 +952,36 @@ uint32_t dVideoPortAIDLImpl::IsHDCPEnabledOnVideoPort(const int32_t handle, bool
 
 uint32_t dVideoPortAIDLImpl::GetTVHDRCapabilities(const int32_t handle, int32_t& capabilities)
 {
-    Device* device = FindDevice(handle);
-    if (device == nullptr) {
+    if (FindDevice(handle) == nullptr) {
         return WPEFramework::Core::ERROR_UNAVAILABLE;
     }
-    HdmiOutput::Capabilities caps;
-    if (!device->output->getCapabilities(&caps).isOk()) {
-        return WPEFramework::Core::ERROR_GENERAL;
+    // Mapping: dsGetTVHDRCapabilities -> IHDMIOutputControllerListener.onEDID(), i.e. the sink's EDID.
+    SinkEdidInfo info;
+    bool connected = false;
+    const uint32_t result = ReadSinkEdid(handle, info, connected);
+    if (result != WPEFramework::Core::ERROR_NONE) {
+        return result;
     }
-    int32_t bitmask = 0x0; // dsHDRSTANDARD_NONE
-    for (const auto& mode : caps.supportedHDROutputModes) {
-        switch (mode) {
-        case HdmiOutput::HDROutputMode::HLG:          bitmask |= 0x02; break;
-        case HdmiOutput::HDROutputMode::HDR10:        bitmask |= 0x01; break;
-        case HdmiOutput::HDROutputMode::HDR10_PLUS:   bitmask |= 0x10; break;
-        case HdmiOutput::HDROutputMode::DOLBY_VISION: bitmask |= 0x04; break;
-        default: break;
-        }
-    }
-    capabilities = bitmask;
+    capabilities = info.hdrMask;
+    DSLOG_INFO("handle=%d connected=%s TV HDR capabilities=0x%x", handle, connected ? "true" : "false", capabilities);
     return WPEFramework::Core::ERROR_NONE;
 }
 
 uint32_t dVideoPortAIDLImpl::GetTVSupportedResolutions(const int32_t handle, int32_t& resolutions)
 {
-    Device* device = FindDevice(handle);
-    if (device == nullptr) {
+    if (FindDevice(handle) == nullptr) {
         return WPEFramework::Core::ERROR_UNAVAILABLE;
     }
-    HdmiOutput::Capabilities caps;
-    if (!device->output->getCapabilities(&caps).isOk()) {
-        return WPEFramework::Core::ERROR_GENERAL;
+    // Mapping: dsSupportedTvResolutions -> IHDMIOutputControllerListener.onEDID(), i.e. the sink's EDID.
+    SinkEdidInfo info;
+    bool connected = false;
+    const uint32_t result = ReadSinkEdid(handle, info, connected);
+    if (result != WPEFramework::Core::ERROR_NONE) {
+        return result;
     }
-    int32_t bitmask = 0;
-    for (const auto& vic : caps.supportedVICs) {
-        VideoPortResolution resolution;
-        if (VicToResolution(vic, resolution)) {
-            bitmask |= (1 << static_cast<int32_t>(resolution.pixelResolution));
-        }
-    }
-    resolutions = bitmask;
+    resolutions = static_cast<int32_t>(TvResolutionsFromEdid(info));
+    DSLOG_INFO("handle=%d connected=%s TV resolutions=0x%x (%zu VICs)", handle, connected ? "true" : "false",
+        resolutions, info.vics.size());
     return WPEFramework::Core::ERROR_NONE;
 }
 
@@ -802,16 +1100,40 @@ uint32_t dVideoPortAIDLImpl::GetMatrixCoefficients(const int32_t handle, Display
 
 uint32_t dVideoPortAIDLImpl::IsVideoPortDisplaySurround(const int32_t handle, bool& surround)
 {
-    (void)handle;
-    surround = false;
-    return WPEFramework::Core::ERROR_UNAVAILABLE;
+    VideoPortSurroundMode mode = VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_NONE;
+    const uint32_t result = GetVideoPortDisplaySurroundMode(handle, mode);
+    if (result != WPEFramework::Core::ERROR_NONE) {
+        surround = false;
+        return result;
+    }
+    surround = (mode != VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_NONE);
+    return WPEFramework::Core::ERROR_NONE;
 }
 
 uint32_t dVideoPortAIDLImpl::GetVideoPortDisplaySurroundMode(const int32_t handle, VideoPortSurroundMode& surroundMode)
 {
-    (void)handle;
     surroundMode = VideoPortSurroundMode::DS_VIDEO_PORT_SURROUNDMODE_NONE;
-    return WPEFramework::Core::ERROR_UNAVAILABLE;
+    if (FindDevice(handle) == nullptr) {
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+    // A sink device reports its output formats through the audiomixer OutputPortProperty
+    // SUPPORTED_AUDIO_FORMATS / DOLBY_ATMOS_SUPPORT, which this component does not use.
+    if (profileType == TV) {
+        DSLOG_WARN("surround mode of a sink device comes from audiomixer, not hdmioutput");
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+    // Source device: the audio formats of the connected sink come from its EDID (onEDID()).
+    SinkEdidInfo info;
+    bool connected = false;
+    const uint32_t result = ReadSinkEdid(handle, info, connected);
+    if (result != WPEFramework::Core::ERROR_NONE) {
+        return result;
+    }
+    surroundMode = static_cast<VideoPortSurroundMode>(SurroundModeFromEdid(info));
+    DSLOG_INFO("handle=%d connected=%s AC-3 channels=%u E-AC-3 channels=%u surroundMode=%d", handle,
+        connected ? "true" : "false", static_cast<unsigned>(info.maxAc3Channels),
+        static_cast<unsigned>(info.maxEac3Channels), static_cast<int>(surroundMode));
+    return WPEFramework::Core::ERROR_NONE;
 }
 
 uint32_t dVideoPortAIDLImpl::GetCurrentOutputSettings(const int32_t handle, DSOutputSettings& outputSettings)
@@ -1095,13 +1417,21 @@ bool PopulateVideoPortConfigFromAIDL(
     typeCfg.supportedResolutionNames = names;
     videoPortTypes.push_back(typeCfg);
 
-    // The HAL has no default resolution; use the same default as getPersistenceValue().
-    std::string defaultResolution = (profileType == TV) ? "2160p" : "1080p";
-    if (!resolutions.empty() && (names.find(defaultResolution) == std::string::npos)) {
-        defaultResolution = resolutions.back()->name;
+    // Fallback when a port supports none of the territory defaults: same rule as before.
+    std::string fallbackResolution = (profileType == TV) ? "2160p" : "1080p";
+    if (!resolutions.empty() && (names.find(fallbackResolution) == std::string::npos)) {
+        fallbackResolution = resolutions.back()->name;
     }
 
     for (size_t i = 0; i < ids.size(); ++i) {
+        // Mapping: getDefaultResolution -> PlatformCapabilities.nativeFrameRate (territory rate),
+        // limited to the VICs of this port. The middleware applies the mode through Property.VIC.
+        std::string defaultResolution = ResolveDefaultResolution(&caps[i]);
+        if (defaultResolution.empty()) {
+            defaultResolution = fallbackResolution;
+        }
+        DSLOG_INFO("HDMI output id=%d default resolution=%s", ids[i], defaultResolution.c_str());
+
         VideoPortPortConfig portCfg;
         portCfg.videoPortType = VideoPortType::DS_VIDEO_PORT_TYPE_HDMI;
         portCfg.videoPortIndex = static_cast<int32_t>(i);
