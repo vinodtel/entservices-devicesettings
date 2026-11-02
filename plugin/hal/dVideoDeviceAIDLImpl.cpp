@@ -19,6 +19,9 @@
 #include "dVideoDeviceAIDLImpl.h"
 #include "DeviceSettingsTypes.h"
 
+// RPC::IteratorType, used to build the codec profile iterator
+#include <com/com.h>
+#include <core/core.h>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
 #include <com/rdk/hal/PropertyValue.h>
@@ -27,8 +30,16 @@
 #include <com/rdk/hal/hdmioutput/Property.h>
 #include <com/rdk/hal/hdmioutput/State.h>
 #include <com/rdk/hal/hdmioutput/VIC.h>
+#ifdef ENABLE_VIDEODECODER_AIDL
+#include <com/rdk/hal/videodecoder/Capabilities.h>
+#include <com/rdk/hal/videodecoder/CodecCapabilities.h>
+#include <com/rdk/hal/videodecoder/Profile.h>
+#endif
 
+#include <algorithm>
 #include <cstdlib>
+#include <iterator>
+#include <vector>
 
 namespace HdmiOutput = com::rdk::hal::hdmioutput;
 using PropertyValue = com::rdk::hal::PropertyValue;
@@ -71,6 +82,132 @@ int32_t ExtractIntProperty(const std::optional<PropertyValue>& value, int32_t de
         return defaultValue;
     }
     return value->value->get<PropertyValue::Value::intValue>();
+}
+
+// ---------------------------------------------------------------------------
+// IVideoDecoder capabilities (model in dVideoDeviceAIDLImpl.h, namespace VideoDecoderCaps).
+// The values come from IVideoDecoder.getCapabilities() when the VideoDecoder service is available
+// (see GetDecoderCapabilities); otherwise MakeDummyCapabilities() provides placeholder data.
+// ---------------------------------------------------------------------------
+namespace DecoderCaps {
+using namespace VideoDecoderCaps;
+
+void MakeDummyCapabilities(Capabilities& caps)
+{
+    // Every dynamic range is listed so that the HDMI output stays the limiting factor for HDR.
+    caps.supportedDynamicRanges = {
+        DynamicRange::SDR, DynamicRange::HLG, DynamicRange::HDR10,
+        DynamicRange::HDR10_PLUS, DynamicRange::DOLBY_VISION,
+    };
+    caps.supportedCodecs = {
+        { Codec::MPEG2_VIDEO, { { CodecProfile::MPEG2_MAIN, CodecLevel::MPEG2_LEVEL_MAIN, 15000000 } } },
+        { Codec::H264_AVC, { { CodecProfile::H264_HIGH, CodecLevel::H264_LEVEL_4_1, 50000000 } } },
+        { Codec::H265_HEVC, {
+            { CodecProfile::H265_MAIN, CodecLevel::H265_LEVEL_5_1, 100000000 },
+            { CodecProfile::H265_MAIN_10, CodecLevel::H265_LEVEL_5_1, 100000000 },
+            { CodecProfile::H265_MAIN_10_HDR10, CodecLevel::H265_LEVEL_5_1, 100000000 },
+        } },
+    };
+}
+
+#ifdef ENABLE_VIDEODECODER_AIDL
+// Adds the capabilities of one decoder to `out`. Several decoders are merged: dynamic ranges are
+// de-duplicated and the profiles of a codec are appended to its existing entry.
+bool AppendAidlCapabilities(const android::sp<com::rdk::hal::videodecoder::IVideoDecoder>& decoder, Capabilities& out)
+{
+    com::rdk::hal::videodecoder::Capabilities aidlCaps;
+    if (decoder == nullptr || !decoder->getCapabilities(&aidlCaps).isOk()) {
+        return false;
+    }
+    for (const auto aidlRange : aidlCaps.supportedDynamicRanges) {
+        const auto range = static_cast<DynamicRange>(static_cast<int32_t>(aidlRange));
+        if (std::find(out.supportedDynamicRanges.begin(), out.supportedDynamicRanges.end(), range) == out.supportedDynamicRanges.end()) {
+            out.supportedDynamicRanges.push_back(range);
+        }
+    }
+    for (const auto& aidlCodec : aidlCaps.supportedCodecs) {
+        const auto codec = static_cast<Codec>(static_cast<int32_t>(aidlCodec.codec));
+        auto entry = std::find_if(out.supportedCodecs.begin(), out.supportedCodecs.end(),
+            [codec](const CodecCapabilities& item) { return item.codec == codec; });
+        if (entry == out.supportedCodecs.end()) {
+            out.supportedCodecs.push_back({ codec, {} });
+            entry = std::prev(out.supportedCodecs.end());
+        }
+        for (const auto& aidlProfile : aidlCodec.profiles) {
+            entry->profiles.push_back({
+                static_cast<CodecProfile>(static_cast<int32_t>(aidlProfile.profile)),
+                static_cast<CodecLevel>(static_cast<int32_t>(aidlProfile.maxLevel)),
+                aidlProfile.maxBitrateInBps });
+        }
+    }
+    return true;
+}
+#endif
+
+// Legacy dsHDRSTANDARD_* bit of a decoder dynamic range; 0 when it has none (SDR, UNKNOWN).
+int32_t ToHdrBit(const DynamicRange range)
+{
+    switch (range) {
+    case DynamicRange::HLG:          return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HLG);
+    case DynamicRange::HDR10:        return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10);
+    case DynamicRange::HDR10_PLUS:   return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10PLUS);
+    case DynamicRange::DOLBY_VISION: return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_DOLBYVISION);
+    default:                         return 0;
+    }
+}
+
+// Legacy dsVideoCodingFormat_t of a decoder codec. VP9 and AV1 have no legacy equivalent.
+bool ToVideoDeviceCodec(const Codec codec, VideoDeviceCodec& legacyCodec)
+{
+    switch (codec) {
+    case Codec::MPEG2_VIDEO: legacyCodec = VideoDeviceCodec::DS_VIDEO_CODEC_MPEG2;       return true;
+    case Codec::H264_AVC:    legacyCodec = VideoDeviceCodec::DS_VIDEO_CODEC_MPEG4PART10; return true;
+    case Codec::H265_HEVC:   legacyCodec = VideoDeviceCodec::DS_VIDEO_CODEC_MPEGHPART2;  return true;
+    default:                 return false;
+    }
+}
+
+// The legacy profile list only describes HEVC, so profiles of other codecs have no equivalent.
+bool ToHevcProfile(const CodecProfile profile, VideoDeviceCodecHEVCProfile& legacyProfile)
+{
+    switch (profile) {
+    case CodecProfile::H265_MAIN:
+        legacyProfile = VideoDeviceCodecHEVCProfile::DS_VIDEO_CODEC_HEVC_PROFILE_MAIN;
+        return true;
+    case CodecProfile::H265_MAIN_10:
+    case CodecProfile::H265_MAIN_10_HDR10:
+        legacyProfile = VideoDeviceCodecHEVCProfile::DS_VIDEO_CODEC_HEVC_PROFILE_MAIN10;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool ToHevcLevel(const CodecLevel level, float& legacyLevel)
+{
+    switch (level) {
+    case CodecLevel::H265_LEVEL_4:   legacyLevel = 4.0f; return true;
+    case CodecLevel::H265_LEVEL_4_1: legacyLevel = 4.1f; return true;
+    case CodecLevel::H265_LEVEL_5:   legacyLevel = 5.0f; return true;
+    case CodecLevel::H265_LEVEL_5_1: legacyLevel = 5.1f; return true;
+    case CodecLevel::H265_LEVEL_5_2: legacyLevel = 5.2f; return true;
+    case CodecLevel::H265_LEVEL_6:   legacyLevel = 6.0f; return true;
+    case CodecLevel::H265_LEVEL_6_1: legacyLevel = 6.1f; return true;
+    case CodecLevel::H265_LEVEL_6_2: legacyLevel = 6.2f; return true;
+    default:                         return false;
+    }
+}
+}
+
+int32_t ToHdrBit(const HdmiOutput::HDROutputMode mode)
+{
+    switch (mode) {
+    case HdmiOutput::HDROutputMode::HLG:          return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HLG);
+    case HdmiOutput::HDROutputMode::HDR10:        return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10);
+    case HdmiOutput::HDROutputMode::HDR10_PLUS:   return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_HDR10PLUS);
+    case HdmiOutput::HDROutputMode::DOLBY_VISION: return static_cast<int32_t>(HDRStandard::DS_HDRSTANDARD_DOLBYVISION);
+    default:                                      return 0;
+    }
 }
 }
 
@@ -125,6 +262,73 @@ dVideoDeviceAIDLImpl::Device* dVideoDeviceAIDLImpl::FindDevice(const int32_t han
     return nullptr;
 }
 
+#ifdef ENABLE_VIDEODECODER_AIDL
+// Only getCapabilities() is used, which needs no open session, so the decoders are not opened and
+// can be queried by any component. A missing service is not an error: the dummy capabilities are
+// used instead.
+void dVideoDeviceAIDLImpl::AcquireDecoders() // _adminLock held
+{
+    using DecoderManager = com::rdk::hal::videodecoder::IVideoDecoderManager;
+
+    _decoders.clear();
+    const android::sp<android::IServiceManager> serviceManager = android::defaultServiceManager();
+    if (serviceManager == nullptr) {
+        return;
+    }
+    const android::sp<android::IBinder> binder = serviceManager->checkService(
+        android::String16(DecoderManager::serviceName().c_str()));
+    const android::sp<DecoderManager> manager = binder == nullptr ? nullptr : android::interface_cast<DecoderManager>(binder);
+    if (manager == nullptr) {
+        DSLOG_INFO("VideoDecoder AIDL service is not available; VideoDevice uses dummy decoder capabilities");
+        return;
+    }
+
+    std::vector<Decoder::Id> ids;
+    if (!manager->getVideoDecoderIds(&ids).isOk()) {
+        DSLOG_ERR("getVideoDecoderIds failed");
+        return;
+    }
+    for (const auto& id : ids) {
+        android::sp<Decoder> decoder;
+        if (manager->getVideoDecoder(id, &decoder).isOk() && decoder != nullptr) {
+            _decoders.push_back(decoder);
+        } else {
+            DSLOG_ERR("getVideoDecoder failed for id=%d", id.value);
+        }
+    }
+    DSLOG_INFO("VideoDecoder AIDL: %zu of %zu decoder(s) acquired", _decoders.size(), ids.size());
+}
+#endif
+
+bool dVideoDeviceAIDLImpl::GetDecoderCapabilities(const Device& device, VideoDecoderCaps::Capabilities& caps)
+{
+    caps = VideoDecoderCaps::Capabilities();
+#ifdef ENABLE_VIDEODECODER_AIDL
+    // The decoder with the same index as the device is used; without one, all decoders are merged.
+    if (device.decoder != nullptr) {
+        if (!DecoderCaps::AppendAidlCapabilities(device.decoder, caps)) {
+            DSLOG_ERR("IVideoDecoder.getCapabilities failed for handle=%d", device.id.value);
+            return false;
+        }
+        return true;
+    }
+    if (!_decoders.empty()) {
+        bool anyRead = false;
+        for (const auto& decoder : _decoders) {
+            anyRead |= DecoderCaps::AppendAidlCapabilities(decoder, caps);
+        }
+        if (!anyRead) {
+            DSLOG_ERR("IVideoDecoder.getCapabilities failed for every decoder");
+        }
+        return anyRead;
+    }
+#else
+    (void)device;
+#endif
+    DecoderCaps::MakeDummyCapabilities(caps);
+    return true;
+}
+
 void dVideoDeviceAIDLImpl::InitialiseHAL()
 {
     std::lock_guard<std::mutex> lock(_adminLock);
@@ -152,6 +356,12 @@ void dVideoDeviceAIDLImpl::InitialiseHAL()
         DSLOG_ERR("VideoDevice AIDL initialisation FAILED: no HDMI output could be acquired");
         return;
     }
+#ifdef ENABLE_VIDEODECODER_AIDL
+    AcquireDecoders();
+    for (size_t i = 0; i < _devices.size() && i < _decoders.size(); ++i) {
+        _devices[i].decoder = _decoders[i];
+    }
+#endif
     getPersistenceValue();
     _opened = true;
     DSLOG_INFO("VideoDevice AIDL initialised: %zu of %zu HDMI output(s) acquired",
@@ -165,6 +375,9 @@ void dVideoDeviceAIDLImpl::DeInitialiseHAL()
         std::lock_guard<std::mutex> lock(_adminLock);
         _opened = false;
         devices.swap(_devices);
+#ifdef ENABLE_VIDEODECODER_AIDL
+        _decoders.clear();
+#endif
     }
     // The leases are released without _adminLock held: Reset() waits for callbacks that are already
     // running, and OnFrameRateChanged takes _adminLock. The output is closed only when the last
@@ -254,14 +467,23 @@ uint32_t dVideoDeviceAIDLImpl::GetHDRCapabilities(const int32_t handle, int32_t&
     }
     int32_t bitmask = 0x0;
     if (!device->forceDisableHDR) {
+        int32_t outputBits = 0x0;
         for (const auto& mode : caps.supportedHDROutputModes) {
-            switch (mode) {
-            case HdmiOutput::HDROutputMode::HLG:          bitmask |= 0x02; break;
-            case HdmiOutput::HDROutputMode::HDR10:        bitmask |= 0x01; break;
-            case HdmiOutput::HDROutputMode::HDR10_PLUS:   bitmask |= 0x10; break;
-            case HdmiOutput::HDROutputMode::DOLBY_VISION: bitmask |= 0x04; break;
-            default: break;
+            outputBits |= ToHdrBit(mode);
+        }
+        // Mapping: IVideoDecoder.getCapabilities().supportedDynamicRanges and/or
+        // IHDMIOutput.getCapabilities().supportedHDROutputModes. A format counts as supported when
+        // the decoder handles it and the output can emit it; if the decoder capabilities cannot be
+        // read, the HDMI output alone decides.
+        VideoDecoderCaps::Capabilities decoderCaps;
+        if (GetDecoderCapabilities(*device, decoderCaps)) {
+            int32_t decoderBits = 0x0;
+            for (const auto range : decoderCaps.supportedDynamicRanges) {
+                decoderBits |= DecoderCaps::ToHdrBit(range);
             }
+            bitmask = outputBits & decoderBits;
+        } else {
+            bitmask = outputBits;
         }
     }
     capabilities = bitmask;
@@ -270,18 +492,75 @@ uint32_t dVideoDeviceAIDLImpl::GetHDRCapabilities(const int32_t handle, int32_t&
 
 uint32_t dVideoDeviceAIDLImpl::GetSupportedVideoCodingFormats(const int32_t handle, int32_t& supportedFormats)
 {
-    (void)handle;
-    // Codec support is a video-decoder capability (IVideoDecoderManager), not exposed by IHDMIOutput.
     supportedFormats = 0x0;
+    const Device* device = FindDevice(handle);
+    if (device == nullptr) {
+        return WPEFramework::Core::ERROR_NONE;
+    }
+    // Mapping: IVideoDecoder.getCapabilities().supportedCodecs, converted from the codec list
+    // to the legacy codec bitmask.
+    VideoDecoderCaps::Capabilities decoderCaps;
+    if (!GetDecoderCapabilities(*device, decoderCaps)) {
+        return WPEFramework::Core::ERROR_GENERAL;
+    }
+    int32_t bitmask = 0x0;
+    for (const auto& entry : decoderCaps.supportedCodecs) {
+        VideoDeviceCodec legacyCodec;
+        if (DecoderCaps::ToVideoDeviceCodec(entry.codec, legacyCodec)) {
+            bitmask |= static_cast<int32_t>(legacyCodec);
+        }
+    }
+    supportedFormats = bitmask;
     return WPEFramework::Core::ERROR_NONE;
 }
 
 uint32_t dVideoDeviceAIDLImpl::GetCodecInfo(const int32_t handle, const VideoDeviceCodec videoCodec, IDeviceSettingsVideoCodecProfileSupportIterator*& codecInfo)
 {
-    (void)handle;
-    (void)videoCodec;
     codecInfo = nullptr;
-    return WPEFramework::Core::ERROR_UNAVAILABLE;
+    const Device* device = FindDevice(handle);
+    if (device == nullptr) {
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+    // Mapping: IVideoDecoder.getCapabilities().supportedCodecs entries, filtered by the requested
+    // codec; each Profile entry becomes one legacy profile/level pair.
+    VideoDecoderCaps::Capabilities decoderCaps;
+    if (!GetDecoderCapabilities(*device, decoderCaps)) {
+        return WPEFramework::Core::ERROR_GENERAL;
+    }
+
+    const VideoDecoderCaps::CodecCapabilities* codecCaps = nullptr;
+    for (const auto& entry : decoderCaps.supportedCodecs) {
+        VideoDeviceCodec legacyCodec;
+        if (DecoderCaps::ToVideoDeviceCodec(entry.codec, legacyCodec) && legacyCodec == videoCodec) {
+            codecCaps = &entry;
+            break;
+        }
+    }
+    if (codecCaps == nullptr) {
+        DSLOG_WARN("Codec %d is not supported by the video decoder", static_cast<int>(videoCodec));
+        return WPEFramework::Core::ERROR_UNAVAILABLE;
+    }
+
+    // Several decoder profiles can share one legacy profile (MAIN_10 and MAIN_10_HDR10): keep the highest level.
+    std::vector<VideoDeviceCodecProfileSupport> profiles;
+    for (const auto& decoderProfile : codecCaps->profiles) {
+        VideoDeviceCodecProfileSupport support;
+        if (!DecoderCaps::ToHevcProfile(decoderProfile.profile, support.profile)
+            || !DecoderCaps::ToHevcLevel(decoderProfile.maxLevel, support.level)) {
+            continue;
+        }
+        auto existing = std::find_if(profiles.begin(), profiles.end(),
+            [&support](const VideoDeviceCodecProfileSupport& item) { return item.profile == support.profile; });
+        if (existing == profiles.end()) {
+            profiles.push_back(support);
+        } else if (support.level > existing->level) {
+            existing->level = support.level;
+        }
+    }
+
+    using CodecProfileIterator = WPEFramework::RPC::IteratorType<IDeviceSettingsVideoCodecProfileSupportIterator>;
+    codecInfo = WPEFramework::Core::Service<CodecProfileIterator>::Create<IDeviceSettingsVideoCodecProfileSupportIterator>(profiles);
+    return codecInfo != nullptr ? WPEFramework::Core::ERROR_NONE : WPEFramework::Core::ERROR_GENERAL;
 }
 
 uint32_t dVideoDeviceAIDLImpl::DisableHDR(const int32_t handle, const bool disable)

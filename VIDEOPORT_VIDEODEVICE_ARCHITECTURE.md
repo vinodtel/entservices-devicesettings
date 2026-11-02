@@ -482,7 +482,8 @@ sequenceDiagram
 | Quantization range, color space, matrix coefficients, surround mode, background color, HDMI preference, force-disable-4K | Not exposed by `com.rdk.hal.hdmioutput`; getters return `ERROR_UNAVAILABLE`, setters are logged no-ops. | Supported when the corresponding optional `dsVideoPort*` symbol is present in the platform DS HAL library. |
 | HDCP enable/disable | Not exposed by `IHDMIOutputController`; returns `ERROR_UNAVAILABLE`. | Supported via `dsEnableHDCP`. |
 | Zoom/DFC (VideoDevice) | Cached only; requires `IPlaneControl` (out of scope for this integration). | Fully supported via `dsSetDFC`/`dsGetDFC` with persistence. |
-| FRF mode, codec info, supported coding formats (VideoDevice) | Not exposed by `IHDMIOutput`; requires `IPanelOutput`/`IVideoDecoderManager`. | Supported via optional `dsSetFRFMode`/`dsGetVideoCodecInfo`/`dsGetSupportedVideoCodingFormats` symbols. |
+| FRF mode (VideoDevice) | Not exposed by `IHDMIOutput`; requires `IPanelOutput`. | Supported via optional `dsSetFRFMode` symbol. |
+| HDR capabilities, supported coding formats, codec info (VideoDevice) | Built from `IVideoDecoder.getCapabilities()` (`supportedDynamicRanges` intersected with `IHDMIOutput` `supportedHDROutputModes`; `supportedCodecs` for formats and codec info). The decoder capabilities are read from the `com.rdk.hal.videodecoder` service when built with `ENABLE_VIDEODECODER_AIDL` (see `plugin/CMakeLists.txt`, `VIDEODECODER_AIDL_VERSION`) and the service is published; otherwise they are dummy data. | Supported via optional `dsGetHDRCapabilities`/`dsGetVideoCodecInfo`/`dsGetSupportedVideoCodingFormats` symbols. |
 
 ## Build-Time Backend Enablement
 

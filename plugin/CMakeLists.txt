@@ -219,8 +219,37 @@ if(HDMIOUTPUT_AIDL_INCLUDE_DIR
         ${ANDROID_BINDER_LIBRARY}
         ${ANDROID_UTILS_LIBRARY})
     set_target_properties(${PLUGIN_IMPLEMENTATION} PROPERTIES CXX_STANDARD 17)
+    set(HDMIOUTPUT_AIDL_ENABLED ON)
 else()
     message(STATUS "HDMI Output AIDL HAL artifacts not found; VideoPort/VideoDevice will use DS HAL only")
+endif()
+
+# VideoDecoder AIDL is optional and only used by dVideoDeviceAIDLImpl, to read
+# IVideoDecoder.getCapabilities() (HDR capabilities, supported coding formats, codec info).
+# Without it VideoDevice reports dummy decoder capabilities. Set VIDEODECODER_AIDL_VERSION to the
+# version installed in the sysroot (it must match the include path and the library name).
+set(VIDEODECODER_AIDL_VERSION "0.2.0.1" CACHE STRING "Version of the videodecoder AIDL HAL installed in the sysroot")
+find_path(VIDEODECODER_AIDL_INCLUDE_DIR
+    NAMES com/rdk/hal/videodecoder/IVideoDecoderManager.h
+    PATHS ${CMAKE_SYSROOT}/usr/include
+    PATH_SUFFIXES
+        mw/videodecoder/${VIDEODECODER_AIDL_VERSION}/include
+        vendor/videodecoder/${VIDEODECODER_AIDL_VERSION}/include)
+
+find_library(VIDEODECODER_AIDL_LIBRARY
+    NAMES videodecoder-v${VIDEODECODER_AIDL_VERSION}-cpp
+    PATHS ${CMAKE_SYSROOT}/usr/lib
+    PATH_SUFFIXES mw/rdk-halif-aidl vendor/rdk-halif-aidl)
+
+if(HDMIOUTPUT_AIDL_ENABLED
+        AND VIDEODECODER_AIDL_INCLUDE_DIR
+        AND VIDEODECODER_AIDL_LIBRARY)
+    message(STATUS "Enabling VideoDecoder AIDL HAL support (${VIDEODECODER_AIDL_VERSION})")
+    target_compile_definitions(${PLUGIN_IMPLEMENTATION} PRIVATE ENABLE_VIDEODECODER_AIDL)
+    target_include_directories(${PLUGIN_IMPLEMENTATION} PRIVATE ${VIDEODECODER_AIDL_INCLUDE_DIR})
+    target_link_libraries(${PLUGIN_IMPLEMENTATION} PRIVATE ${VIDEODECODER_AIDL_LIBRARY})
+else()
+    message(STATUS "VideoDecoder AIDL HAL artifacts not found; VideoDevice will use dummy decoder capabilities")
 endif()
 
 #if(RDK_SERVICES_L1_TEST OR RDK_SERVICE_L2_TEST)
