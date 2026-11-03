@@ -126,7 +126,7 @@ flowchart TB
 | Get handle | `VideoDevice::GetVideoDeviceHandle` | fixed handle for default `IHDMIOutput` | `dsGetVideoDevice` |
 | Zoom/DFC | `SetVideoDeviceDFC` / `GetVideoDeviceDFC` | unsupported (cached only; requires `IPlaneControl`) | `dsSetDFC` / `dsGetDFC` |
 | HDR capabilities | `GetHDRCapabilities` | `IHDMIOutput::getCapabilities().supportedHDROutputModes` | `dsGetHDRCapabilities` |
-| Display frame rate | `GetCurrentDisplayFrameRate` / `SetDisplayFrameRate` | get: derived from `VIC` property (read-only); set: unsupported (needs `IPanelOutput.setRefreshRate`) | `dsGetCurrentDisplayframerate` / `dsSetDisplayframerate` |
+| Display frame rate | `GetCurrentDisplayFrameRate` / `SetDisplayFrameRate` | unsupported until `IPanelOutput.getRefreshRate` / `setRefreshRate` are integrated; HDMI VIC is not used as a substitute | `dsGetCurrentDisplayframerate` / `dsSetDisplayframerate` |
 
 ## Event Mapping
 
@@ -136,7 +136,7 @@ flowchart TB
 | `OnHDCPStatusChange` | VideoPort | `IHDMIOutputControllerListener::onHDCPStatusChanged` | `dsRegisterHdcpStatusCallback` |
 | `OnVideoFormatUpdate` | VideoPort | `dsVideoFormatUpdateRegisterCB` (legacy only; no direct AIDL equivalent) | `dsVideoFormatUpdateRegisterCB` |
 | `OnZoomSettingsChanged` | VideoDevice | fired on cached `SetVideoDeviceDFC` call (no HAL-driven event) | manual trigger inside `SetVideoDeviceDFC` |
-| `OnDisplayFrameratePreChange` / `OnDisplayFrameratePostChange` | VideoDevice | `IHDMIOutputControllerListener::onFrameRateChanged` / around `SetDisplayFrameRate` | `dsRegisterFrameratePreChangeCB` / `dsRegisterFrameratePostChangeCB` |
+| `OnDisplayFrameratePreChange` / `OnDisplayFrameratePostChange` | VideoDevice | unsupported until the mapped `IPanelOutput` listener path is integrated | `dsRegisterFrameratePreChangeCB` / `dsRegisterFrameratePostChangeCB` |
 
 ## Class Diagram
 
@@ -452,26 +452,22 @@ sequenceDiagram
     Component->>Clients: INotification::OnHDCPStatusChange(hdcpStatus)
 ```
 
-## Frame Rate Change Event Flow (VideoDevice, AIDL backend)
+## Display Frame Rate Flow (VideoDevice, AIDL backend)
 
 ```mermaid
 sequenceDiagram
-    participant Output as IHDMIOutput
-    participant Listener as ControllerListener<br/>(BnHDMIOutputControllerListener)
-    participant AIDL as dVideoDeviceAIDLImpl
-    participant Facade as VideoDevice
+    participant Clients as FrameRate clients
     participant Component as DeviceSettingsVideoDeviceImpl
-    participant Clients as Registered notification clients
+    participant Facade as VideoDevice
+    participant AIDL as dVideoDeviceAIDLImpl
 
-    Output-->>Listener: onFrameRateChanged()
-    Listener->>AIDL: OnFrameRateChanged()
-    AIDL->>Output: getProperty(VIC)
-    Output-->>AIDL: current VIC
-    AIDL->>AIDL: FindByVic(vic) -> frameRateHz
-    AIDL->>Facade: _callbacks.OnDisplayFrameratePostChange(frameRate)
-    Facade->>Component: OnDisplayFrameratePostChange(frameRate)
-    Component->>Component: dispatchVideoDeviceEvent (sync fan-out)
-    Component->>Clients: INotification::OnDisplayFrameratePostChange(frameRate)
+    Clients->>Component: GetCurrentDisplayFrameRate / SetDisplayFrameRate
+    Component->>Facade: delegate request
+    Facade->>AIDL: mapped request
+    Note over AIDL: IPanelOutput is not integrated;<br/>HDMI VIC is not a substitute
+    AIDL-->>Facade: ERROR_UNAVAILABLE
+    Facade-->>Component: ERROR_UNAVAILABLE
+    Component-->>Clients: request rejected
 ```
 
 ## Backend Capability Notes
@@ -483,7 +479,7 @@ sequenceDiagram
 | HDCP enable/disable | Not exposed by `IHDMIOutputController`; returns `ERROR_UNAVAILABLE`. | Supported via `dsEnableHDCP`. |
 | Zoom/DFC (VideoDevice) | Cached only; requires `IPlaneControl` (out of scope for this integration). | Fully supported via `dsSetDFC`/`dsGetDFC` with persistence. |
 | FRF mode (VideoDevice) | Not exposed by `IHDMIOutput`; requires `IPanelOutput`. | Supported via optional `dsSetFRFMode` symbol. |
-| HDR capabilities, supported coding formats, codec info (VideoDevice) | Built from `IVideoDecoder.getCapabilities()` (`supportedDynamicRanges` intersected with `IHDMIOutput` `supportedHDROutputModes`; `supportedCodecs` for formats and codec info). The decoder capabilities are read from the `com.rdk.hal.videodecoder` service when built with `ENABLE_VIDEODECODER_AIDL` (see `plugin/CMakeLists.txt`, `VIDEODECODER_AIDL_VERSION`) and the service is published; otherwise they are dummy data. | Supported via optional `dsGetHDRCapabilities`/`dsGetVideoCodecInfo`/`dsGetSupportedVideoCodingFormats` symbols. |
+| HDR capabilities, supported coding formats, codec info (VideoDevice) | Built from `IVideoDecoder.getCapabilities()` (`supportedDynamicRanges` intersected with `IHDMIOutput` `supportedHDROutputModes`; `supportedCodecs` for formats and codec info). The decoder capabilities are read from the `com.rdk.hal.videodecoder` service when built with `ENABLE_VIDEODECODER_AIDL` (see `plugin/CMakeLists.txt`, `VIDEODECODER_AIDL_VERSION`) and the service is published. Missing decoder support is reported instead of fabricating capabilities; HDR retains its documented HDMI-only fallback when decoder capabilities cannot be read. | Supported via optional `dsGetHDRCapabilities`/`dsGetVideoCodecInfo`/`dsGetSupportedVideoCodingFormats` symbols. |
 
 ## Build-Time Backend Enablement
 

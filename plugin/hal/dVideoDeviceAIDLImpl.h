@@ -84,12 +84,12 @@ struct Capabilities {
 
 // Implements the VideoDevice HAL Platform interface (see dVideoDevice.h) on top of the
 // com.rdk.hal.hdmioutput AIDL HAL. Per the VideoPort/VideoDevice API mapping most dsVideoDevice.c
-// APIs are backed by IPanelOutput/IVideoDecoderManager (not wired here). The HDMI Output surface
-// (HDR capabilities, current VIC frame rate) is functional; the HDR capabilities, supported coding
-// formats and codec info additionally use IVideoDecoder.getCapabilities(). That is read from the
+// APIs are backed by IPanelOutput/IVideoDecoderManager (IPanelOutput is not wired here). The HDMI
+// Output surface is functional; the HDR capabilities, supported coding formats and codec info
+// additionally use IVideoDecoder.getCapabilities(). That is read from the
 // com.rdk.hal.videodecoder service when the plugin is built with ENABLE_VIDEODECODER_AIDL and the
-// service is published; otherwise dummy decoder capabilities are used. The remaining APIs report
-// ERROR_UNAVAILABLE.
+// service is published; codec capability APIs fail when real decoder capabilities are unavailable.
+// The remaining APIs report ERROR_UNAVAILABLE.
 //
 // The HDMI output is shared with dVideoPortAIDLImpl through HdmiOutputHelper: IHDMIOutput.open()
 // needs State::CLOSED and only one event listener is allowed per output, so whichever component
@@ -141,14 +141,12 @@ private:
     bool AcquireOutput(const Output::Id& id, Device& device);
     Device* FindDevice(const int32_t handle);
 
-    // Fills `caps` from IVideoDecoder.getCapabilities(); falls back to dummy data when the
-    // VideoDecoder service is not available. Returns false only if a reachable decoder fails.
+    // Fills `caps` from IVideoDecoder.getCapabilities(). Returns false when VideoDecoder AIDL is
+    // not built, no decoder is available, or no decoder capabilities can be read.
     bool GetDecoderCapabilities(const Device& device, VideoDecoderCaps::Capabilities& caps);
 #ifdef ENABLE_VIDEODECODER_AIDL
     void AcquireDecoders();
 #endif
-
-    void OnFrameRateChanged(const int32_t handle);
 
     std::mutex _adminLock;
     CallbackBundle _callbacks;

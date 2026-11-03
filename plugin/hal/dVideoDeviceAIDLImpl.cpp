@@ -24,12 +24,9 @@
 #include <core/core.h>
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
-#include <com/rdk/hal/PropertyValue.h>
 #include <com/rdk/hal/hdmioutput/Capabilities.h>
 #include <com/rdk/hal/hdmioutput/HDROutputMode.h>
-#include <com/rdk/hal/hdmioutput/Property.h>
 #include <com/rdk/hal/hdmioutput/State.h>
-#include <com/rdk/hal/hdmioutput/VIC.h>
 #ifdef ENABLE_VIDEODECODER_AIDL
 #include <com/rdk/hal/videodecoder/Capabilities.h>
 #include <com/rdk/hal/videodecoder/CodecCapabilities.h>
@@ -37,78 +34,18 @@
 #endif
 
 #include <algorithm>
-#include <cstdlib>
 #include <iterator>
 #include <vector>
 
 namespace HdmiOutput = com::rdk::hal::hdmioutput;
-using PropertyValue = com::rdk::hal::PropertyValue;
 
 namespace {
-// Frame-rate-only view of the VIC table: which VIC to use to keep the same resolution
-// family (1080p/2160p) while switching to a different frame rate (FRF-mode style switch).
-struct FrameRateVicEntry {
-    HdmiOutput::VIC vic;
-    VideoResolution family;
-    uint32_t frameRateHz;
-};
-
-const FrameRateVicEntry kFrameRateTable[] = {
-    { HdmiOutput::VIC::VIC32_1920_1080_P_24_16_9, VideoResolution::DS_VIDEO_PIXELRES_1920X1080, 24 },
-    { HdmiOutput::VIC::VIC33_1920_1080_P_25_16_9, VideoResolution::DS_VIDEO_PIXELRES_1920X1080, 25 },
-    { HdmiOutput::VIC::VIC34_1920_1080_P_30_16_9, VideoResolution::DS_VIDEO_PIXELRES_1920X1080, 30 },
-    { HdmiOutput::VIC::VIC31_1920_1080_P_50_16_9, VideoResolution::DS_VIDEO_PIXELRES_1920X1080, 50 },
-    { HdmiOutput::VIC::VIC16_1920_1080_P_60_16_9, VideoResolution::DS_VIDEO_PIXELRES_1920X1080, 60 },
-    { HdmiOutput::VIC::VIC93_3840_2160_P_24_16_9, VideoResolution::DS_VIDEO_PIXELRES_3840X2160, 24 },
-    { HdmiOutput::VIC::VIC94_3840_2160_P_25_16_9, VideoResolution::DS_VIDEO_PIXELRES_3840X2160, 25 },
-    { HdmiOutput::VIC::VIC95_3840_2160_P_30_16_9, VideoResolution::DS_VIDEO_PIXELRES_3840X2160, 30 },
-    { HdmiOutput::VIC::VIC96_3840_2160_P_50_16_9, VideoResolution::DS_VIDEO_PIXELRES_3840X2160, 50 },
-    { HdmiOutput::VIC::VIC97_3840_2160_P_60_16_9, VideoResolution::DS_VIDEO_PIXELRES_3840X2160, 60 },
-};
-
-const FrameRateVicEntry* FindByVic(HdmiOutput::VIC vic)
-{
-    for (const auto& entry : kFrameRateTable) {
-        if (entry.vic == vic) {
-            return &entry;
-        }
-    }
-    return nullptr;
-}
-
-int32_t ExtractIntProperty(const std::optional<PropertyValue>& value, int32_t defaultValue)
-{
-    if (!value.has_value() || !value->value.has_value() || value->value->getTag() != PropertyValue::Value::intValue) {
-        return defaultValue;
-    }
-    return value->value->get<PropertyValue::Value::intValue>();
-}
-
 // ---------------------------------------------------------------------------
 // IVideoDecoder capabilities (model in dVideoDeviceAIDLImpl.h, namespace VideoDecoderCaps).
-// The values come from IVideoDecoder.getCapabilities() when the VideoDecoder service is available
-// (see GetDecoderCapabilities); otherwise MakeDummyCapabilities() provides placeholder data.
+// The values come from IVideoDecoder.getCapabilities() (see GetDecoderCapabilities).
 // ---------------------------------------------------------------------------
 namespace DecoderCaps {
 using namespace VideoDecoderCaps;
-
-void MakeDummyCapabilities(Capabilities& caps)
-{
-    // Every dynamic range is listed so that the HDMI output stays the limiting factor for HDR.
-    caps.supportedDynamicRanges = {
-        DynamicRange::SDR, DynamicRange::HLG, DynamicRange::HDR10,
-        DynamicRange::HDR10_PLUS, DynamicRange::DOLBY_VISION,
-    };
-    caps.supportedCodecs = {
-        { Codec::MPEG2_VIDEO, { { CodecProfile::MPEG2_MAIN, CodecLevel::MPEG2_LEVEL_MAIN, 15000000 } } },
-        { Codec::H264_AVC, { { CodecProfile::H264_HIGH, CodecLevel::H264_LEVEL_4_1, 50000000 } } },
-        { Codec::H265_HEVC, {
-            { CodecProfile::H265_MAIN, CodecLevel::H265_LEVEL_5_1, 100000000 },
-            { CodecProfile::H265_MAIN_10, CodecLevel::H265_LEVEL_5_1, 100000000 },
-            { CodecProfile::H265_MAIN_10_HDR10, CodecLevel::H265_LEVEL_5_1, 100000000 },
-        } },
-    };
-}
 
 #ifdef ENABLE_VIDEODECODER_AIDL
 // Adds the capabilities of one decoder to `out`. Several decoders are merged: dynamic ranges are
@@ -228,9 +165,6 @@ dVideoDeviceAIDLImpl::~dVideoDeviceAIDLImpl()
 bool dVideoDeviceAIDLImpl::AcquireOutput(const Output::Id& id, Device& device)
 {
     HdmiOutputHelper::Callbacks callbacks;
-    callbacks.onFrameRateChanged = [this](int32_t handle) {
-        OnFrameRateChanged(handle);
-    };
 
     device.id = id;
     device.lease = HdmiOutputHelper::Instance().Acquire(id.value, std::move(callbacks));
@@ -279,7 +213,7 @@ void dVideoDeviceAIDLImpl::AcquireDecoders() // _adminLock held
         android::String16(DecoderManager::serviceName().c_str()));
     const android::sp<DecoderManager> manager = binder == nullptr ? nullptr : android::interface_cast<DecoderManager>(binder);
     if (manager == nullptr) {
-        DSLOG_INFO("VideoDecoder AIDL service is not available; VideoDevice uses dummy decoder capabilities");
+        DSLOG_ERR("VideoDecoder AIDL service is not available");
         return;
     }
 
@@ -322,11 +256,12 @@ bool dVideoDeviceAIDLImpl::GetDecoderCapabilities(const Device& device, VideoDec
         }
         return anyRead;
     }
+    DSLOG_ERR("No VideoDecoder is available for handle=%d", device.id.value);
 #else
     (void)device;
+    DSLOG_ERR("VideoDecoder AIDL support is not built");
 #endif
-    DecoderCaps::MakeDummyCapabilities(caps);
-    return true;
+    return false;
 }
 
 void dVideoDeviceAIDLImpl::InitialiseHAL()
@@ -379,9 +314,8 @@ void dVideoDeviceAIDLImpl::DeInitialiseHAL()
         _decoders.clear();
 #endif
     }
-    // The leases are released without _adminLock held: Reset() waits for callbacks that are already
-    // running, and OnFrameRateChanged takes _adminLock. The output is closed only when the last
-    // component using it releases its lease.
+    // Reset can wait for callbacks already in progress, so leases are released without
+    // _adminLock held. The output closes only after the last component releases its lease.
     for (auto& device : devices) {
         device.lease.Reset();
     }
@@ -595,18 +529,10 @@ uint32_t dVideoDeviceAIDLImpl::GetFRFMode(const int32_t handle, int32_t& frfmode
 
 uint32_t dVideoDeviceAIDLImpl::GetCurrentDisplayFrameRate(const int32_t handle, string& framerate)
 {
-    const Device* device = FindDevice(handle);
-    if (device == nullptr) {
-        return WPEFramework::Core::ERROR_UNAVAILABLE;
-    }
-    std::optional<PropertyValue> value;
-    if (!device->output->getProperty(HdmiOutput::Property::VIC, &value).isOk()) {
-        return WPEFramework::Core::ERROR_GENERAL;
-    }
-    const auto vic = static_cast<HdmiOutput::VIC>(ExtractIntProperty(value, 0));
-    const FrameRateVicEntry* entry = FindByVic(vic);
-    framerate = entry != nullptr ? std::to_string(entry->frameRateHz) : "60";
-    return WPEFramework::Core::ERROR_NONE;
+    (void)handle;
+    framerate.clear();
+    DSLOG_WARN("Display frame rate is an IPanelOutput property (getRefreshRate) in the API mapping and is not supported here");
+    return WPEFramework::Core::ERROR_UNAVAILABLE;
 }
 
 uint32_t dVideoDeviceAIDLImpl::SetDisplayFrameRate(const int32_t handle, const string framerate)
@@ -615,21 +541,4 @@ uint32_t dVideoDeviceAIDLImpl::SetDisplayFrameRate(const int32_t handle, const s
     (void)framerate;
     DSLOG_WARN("Display frame rate is an IPanelOutput property (setRefreshRate) in the API mapping and is not supported here");
     return WPEFramework::Core::ERROR_UNAVAILABLE;
-}
-
-void dVideoDeviceAIDLImpl::OnFrameRateChanged(const int32_t handle)
-{
-    string framerate;
-    if (GetCurrentDisplayFrameRate(handle, framerate) != WPEFramework::Core::ERROR_NONE) {
-        return;
-    }
-    // Copied under the lock because setAllCallbacks() can replace the callbacks concurrently.
-    std::function<void(const string)> postChange;
-    {
-        std::lock_guard<std::mutex> lock(_adminLock);
-        postChange = _callbacks.OnDisplayFrameratePostChange;
-    }
-    if (postChange) {
-        postChange(framerate);
-    }
 }

@@ -226,7 +226,7 @@ endif()
 
 # VideoDecoder AIDL is optional and only used by dVideoDeviceAIDLImpl, to read
 # IVideoDecoder.getCapabilities() (HDR capabilities, supported coding formats, codec info).
-# Without it VideoDevice reports dummy decoder capabilities. Set VIDEODECODER_AIDL_VERSION to the
+# Without it decoder-backed VideoDevice capability APIs are unavailable. Set VIDEODECODER_AIDL_VERSION to the
 # version installed in the sysroot (it must match the include path and the library name).
 set(VIDEODECODER_AIDL_VERSION "0.2.0.1" CACHE STRING "Version of the videodecoder AIDL HAL installed in the sysroot")
 find_path(VIDEODECODER_AIDL_INCLUDE_DIR
@@ -249,7 +249,7 @@ if(HDMIOUTPUT_AIDL_ENABLED
     target_include_directories(${PLUGIN_IMPLEMENTATION} PRIVATE ${VIDEODECODER_AIDL_INCLUDE_DIR})
     target_link_libraries(${PLUGIN_IMPLEMENTATION} PRIVATE ${VIDEODECODER_AIDL_LIBRARY})
 else()
-    message(STATUS "VideoDecoder AIDL HAL artifacts not found; VideoDevice will use dummy decoder capabilities")
+    message(STATUS "VideoDecoder AIDL HAL artifacts not found; decoder-backed VideoDevice capability APIs will be unavailable")
 endif()
 
 #if(RDK_SERVICES_L1_TEST OR RDK_SERVICE_L2_TEST)
